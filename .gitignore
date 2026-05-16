@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+.venv/
+
+# Databases
+*.db
+*.sqlite3
+
+# Local environment files
+.env
+.vscode/
+.idea/
+
+# Batch files (optional, but good to ignore the push script itself)
+push_repo.bat

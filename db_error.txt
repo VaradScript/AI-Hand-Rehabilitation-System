@@ -1,0 +1,26 @@
+2026-03-09 11:05:38,924 - Database Error: Failed to save session (locked or missing db): table sessions has no column named level
+2026-04-16 15:57:24,104 - Database Error: Failed to save session (locked or missing db): table sessions has no column named level
+2026-04-16 17:12:34,719 - Database Error: Failed to save session (locked or missing db): table sessions has no column named level
+2026-04-16 17:24:44,585 - Database Error: Failed to save session (locked or missing db): table sessions has no column named level
+2026-04-16 17:28:23,723 - Database Error: Failed to save session (locked or missing db): table sessions has no column named level
+2026-04-16 17:32:49,709 - Database Error: Failed to save session (locked or missing db): table sessions has no column named level
+2026-04-16 17:45:53,297 - Database Error: Failed to save session (locked or missing db): table sessions has no column named level
+2026-04-16 17:47:07,932 - Database Error: Failed to save session (locked or missing db): table sessions has no column named level
+2026-04-16 17:48:05,740 - Database Error: Failed to save session (locked or missing db): table sessions has no column named level
+2026-04-16 19:07:03,936 - Database Error: Failed to save session (locked or missing db): table sessions has no column named level
+2026-04-16 19:07:52,687 - Database Error: Failed to save session (locked or missing db): table sessions has no column named level
+2026-04-16 19:08:28,200 - Database Error: Failed to save session (locked or missing db): table sessions has no column named level
+2026-04-17 09:37:15,208 - Database Error: Failed to save session (locked or missing db): table sessions has no column named level
+2026-04-17 09:37:55,087 - Database Error: Failed to save session (locked or missing db): table sessions has no column named level
+2026-04-17 09:38:33,652 - Database Error: Failed to save session (locked or missing db): table sessions has no column named level
+2026-04-17 09:52:14,814 - Database Error: Failed to save session (locked or missing db): table sessions has no column named level
+2026-04-17 10:02:48,356 - Database Error: Failed to save session (locked or missing db): table sessions has no column named score
+2026-04-17 10:07:39,547 - Database Error: Failed to save session (locked or missing db): table sessions has no column named score
+2026-04-17 10:53:48,046 - Database Error: Failed to save session (locked or missing db): table sessions has no column named score
+2026-04-17 11:24:36,493 - Database Error: Failed to save session (locked or missing db): table sessions has no column named score
+2026-04-17 11:37:03,256 - Database Error: Failed to save session (locked or missing db): table sessions has no column named max_finger_extension
+2026-05-11 21:07:02.354428 - Init Error: file is not a database
+2026-05-11 21:11:28.336401 - Init Error: file is not a database
+2026-05-11 21:12:57,403 - Database Error: Failed to save session (locked or missing db): file is not a database
+2026-05-13 06:40:25.599276 - Init Error: file is not a database
+2026-05-13 06:48:42.980364 - Init Error: file is not a database
