@@ -431,6 +431,7 @@ class GameState(Enum):
     RESULTS = 21
     CLOUD_SYNC = 23
     THERAPIST_DASHBOARD = 24
+    CALIBRATION = 25
 
 class AgeGroup(Enum):
     CHILD = "child"          # 5-12 years
@@ -492,21 +493,19 @@ class Seed:
 # ============================================================================
 
 class WebcamStream:
-    """High-performance threaded webcam capture"""
+    """High-performance non-blocking threaded webcam capture"""
     
     def __init__(self, src=0, width=640, height=480):
-        self.stream = cv2.VideoCapture(src)
-        if not self.stream.isOpened():
-            raise RuntimeError("Failed to open camera")
-        
-        self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        self.stream.set(cv2.CAP_PROP_FPS, 30)
-        self.stream.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        
-        self.grabbed, self.frame = self.stream.read()
+        self.src = src
+        self.width = width
+        self.height = height
+        self.stream = None
+        self.grabbed = False
+        self.frame = None
         self.running = False
         self.lock = threading.Lock()
+        self.init_done = False
+        self.init_error = False
         
     def start(self):
         self.running = True
@@ -515,6 +514,29 @@ class WebcamStream:
         return self
     
     def _update(self):
+        # Open camera in background thread to prevent blocking Pygame GUI thread
+        try:
+            self.stream = cv2.VideoCapture(self.src)
+            if not self.stream.isOpened():
+                raise RuntimeError("Failed to open camera")
+            
+            self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            self.stream.set(cv2.CAP_PROP_FPS, 30)
+            self.stream.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            
+            grabbed, frame = self.stream.read()
+            if grabbed and frame is not None:
+                with self.lock:
+                    self.grabbed = grabbed
+                    self.frame = frame
+            self.init_done = True
+        except Exception as e:
+            print(f"Background camera initialization failed: {e}")
+            self.init_error = True
+            self.init_done = True
+            return
+            
         while self.running:
             try:
                 grabbed, frame = self.stream.read()
@@ -536,10 +558,11 @@ class WebcamStream:
         self.running = False
         if hasattr(self, 'thread'):
             self.thread.join(timeout=2.0)
-        try:
-            self.stream.release()
-        except Exception:
-            pass
+        if self.stream is not None:
+            try:
+                self.stream.release()
+            except Exception:
+                pass
 
 # ============================================================================
 # HAND TRACKING ENGINE
@@ -564,6 +587,11 @@ class HandEngine:
         self.thread = None
         self.lock = threading.Lock()
         
+        # Calibration defaults
+        self.fist_threshold = 0.12
+        self.calibration_active = False
+        self.calibrated_max_extension = 170.0
+        
         # Smoothing buffers (weighted average)
         self.index_x_buffer = deque(maxlen=SMOOTHING_WINDOW)
         self.index_y_buffer = deque(maxlen=SMOOTHING_WINDOW)
@@ -573,8 +601,12 @@ class HandEngine:
         self.mirrored_frame = None
         
     def start(self):
-        self.webcam = WebcamStream(src=0).start()
-        # Removed 1s sleep for faster startup
+        try:
+            self.webcam = WebcamStream(src=0).start()
+        except Exception as e:
+            print(f"Camera initialization failed: {e}")
+            self.webcam = None
+            
         self.running = True
         self.thread = threading.Thread(target=self._tracking_loop, daemon=True)
         self.thread.start()
@@ -644,6 +676,18 @@ class HandEngine:
         smooth_x = weighted_average(self.index_x_buffer)
         smooth_y = weighted_average(self.index_y_buffer)
         
+        # Dynamic Reach Scaling based on Calibration ROM
+        if self.calibration_active and self.calibrated_max_extension < 170.0:
+            extension_mult = 170.0 / self.calibrated_max_extension
+            center_x = GAME_AREA_WIDTH / 2
+            center_y = WINDOW_HEIGHT / 2
+            
+            scaled_offset_x = (smooth_x - center_x) * extension_mult
+            scaled_offset_y = (smooth_y - center_y) * extension_mult
+            
+            smooth_x = np.clip(center_x + scaled_offset_x, 15, GAME_AREA_WIDTH - 15)
+            smooth_y = np.clip(center_y + scaled_offset_y, 15, WINDOW_HEIGHT - 15)
+            
         index_pos = (int(smooth_x), int(smooth_y))
         thumb_pos = (int(thumb_tip.x * GAME_AREA_WIDTH), int(thumb_tip.y * WINDOW_HEIGHT))
         
@@ -669,7 +713,7 @@ class HandEngine:
         # Fist detection (all fingertips close to palm)
         avg_finger_y = (index_tip.y + middle_tip.y + ring_tip.y + pinky_tip.y) / 4
         palm_y = (wrist.y + middle_mcp.y) / 2
-        is_fist = abs(avg_finger_y - palm_y) < 0.12  # Tighter fist check to reduce false positives
+        is_fist = abs(avg_finger_y - palm_y) < self.fist_threshold
         
         # Finger extension (max reach)
         extension = math.sqrt(
@@ -1122,14 +1166,46 @@ class SelectionRing:
 class LevelButton:
     """Level selection button — polished card style"""
 
-    def __init__(self, x, y, width, height, text, level_num):
+    def __init__(self, x, y, width, height, text, level_num, ring_radius=55):
         self.rect = pygame.Rect(x, y, width, height)
         self.text = text
         self.level_num = level_num
-        self.ring = SelectionRing(x + width // 2, y + height // 2, 55)
+        
+        # Calculate dynamic selection ring radius and center to place on the right side.
+        # Cap the radius at a safe fraction of button height to ensure it fits perfectly.
+        ring_r = min(ring_radius, (height - 16) // 2)
+        ring_x = x + width - ring_r - 20
+        ring_y = y + height // 2
+        self.ring = SelectionRing(ring_x, ring_y, ring_r)
 
     def update(self, cursor_pos: Optional[Tuple[int, int]]) -> bool:
-        return self.ring.update(cursor_pos)
+        """Hover detection based on full card bounding box instead of just the ring center.
+        Makes interaction significantly easier and more intuitive for rehab patients.
+        """
+        m_pos = pygame.mouse.get_pos()
+        m_clicked = pygame.mouse.get_pressed()[0]
+        
+        is_hovered = False
+        if self.rect.collidepoint(m_pos):
+            is_hovered = True
+            if m_clicked:
+                self.ring.hover_start = None
+                return True
+                
+        if cursor_pos is not None and self.rect.collidepoint(cursor_pos):
+            is_hovered = True
+            
+        if is_hovered:
+            if self.ring.hover_start is None:
+                self.ring.hover_start = time.time()
+            elapsed = time.time() - self.ring.hover_start
+            if elapsed >= self.ring.duration:
+                self.ring.hover_start = None
+                return True
+        else:
+            self.ring.hover_start = None
+            
+        return False
 
     def draw(self, screen, font, base_col=None, hov_col=None):
         _, _, _, font_badge = _get_ui_fonts()
@@ -1152,15 +1228,38 @@ class LevelButton:
         border_color = (50, 255, 150) if is_hovering else (0, 180, 220)
         pygame.draw.rect(screen, border_color, self.rect, 4 if is_hovering else 3, border_radius=16)
 
-        badge_rect = pygame.Rect(self.rect.x + 10, self.rect.y + 10, 36, 36)
+        # Badge: Vertically center for normal buttons, slightly offset down for tall cards
+        badge_y = self.rect.y + 12 if self.rect.height <= 80 else self.rect.y + 16
+        badge_rect = pygame.Rect(self.rect.x + 12, badge_y, 36, 36)
         badge_color = (50, 255, 150) if is_hovering else (0, 150, 200)
         pygame.draw.rect(screen, badge_color, badge_rect, border_radius=8)
         badge_text = font_badge.render(str(self.level_num), True, (0, 0, 0))
         screen.blit(badge_text, badge_text.get_rect(center=badge_rect.center))
 
         text_color = (255, 255, 255) if is_hovering else (200, 210, 230)
-        text_surf = font.render(self.text, True, text_color)
-        screen.blit(text_surf, text_surf.get_rect(center=(self.rect.centerx, self.rect.centery - 10)))
+        
+        # Split text by newlines for multiline age group cards
+        lines = [line.strip() for line in self.text.split('\n') if line.strip()]
+        if len(lines) > 1:
+            # Multi-line card layout (e.g. age group selection card)
+            left_boundary = self.rect.x + 60
+            right_boundary = self.ring.x - self.ring.radius - 15
+            center_x = (left_boundary + right_boundary) // 2
+            
+            line_heights = [font.size(line)[1] for line in lines]
+            total_h = sum(line_heights) + (len(lines) - 1) * 6
+            start_y = self.rect.centery - total_h // 2
+            
+            for line in lines:
+                surf = font.render(line, True, text_color)
+                rect = surf.get_rect(center=(center_x, start_y + surf.get_height() // 2))
+                screen.blit(surf, rect)
+                start_y += surf.get_height() + 6
+        else:
+            # Single line buttons (e.g. level button or bottom utility button)
+            # Center vertically, left-aligned at x+60 (just next to level badge)
+            text_surf = font.render(self.text, True, text_color)
+            screen.blit(text_surf, text_surf.get_rect(midleft=(self.rect.x + 60, self.rect.centery)))
 
         bar_h = 6
         bar_rect = pygame.Rect(self.rect.x + 12, self.rect.bottom - bar_h - 8,
@@ -1174,69 +1273,63 @@ class LevelButton:
         self.ring.draw(screen)
 
 class HomeIcon:
-    """Fist-hold pause/quit icon - REDESIGNED"""
+    """Fist-hold + Hover-click pause/quit icon - SUPER ACCESSIBLE REDESIGN"""
     
     def __init__(self, x, y, width, height):
         self.rect = pygame.Rect(x, y, width, height)
-        self.hold_start = None
-        self.duration = FIST_HOLD_DURATION
+        self.duration = HOVER_DURATION
+        self.ring = SelectionRing(x + 30, y + height // 2, 18, duration=self.duration)
         self.font = pygame.font.SysFont("segoeui", 20, bold=True)
         
     def update(self, is_fist: bool, cursor_pos: Optional[Tuple[int, int]]) -> bool:
-        """Returns True when fist hold is complete"""
-        if not is_fist or cursor_pos is None:
-            self.hold_start = None
-            return False
+        """Returns True when hover or fist hold is complete"""
+        m_pos = pygame.mouse.get_pos()
+        m_clicked = pygame.mouse.get_pressed()[0]
         
-        if self.rect.collidepoint(cursor_pos):
-            if self.hold_start is None:
-                self.hold_start = time.time()
+        is_hovered = False
+        if self.rect.collidepoint(m_pos):
+            is_hovered = True
+            if m_clicked:
+                self.ring.hover_start = None
+                return True
+                
+        if cursor_pos is not None and self.rect.collidepoint(cursor_pos):
+            is_hovered = True
             
-            elapsed = time.time() - self.hold_start
-            if elapsed >= self.duration:
-                self.hold_start = None
+        if is_fist:
+            is_hovered = True
+            
+        if is_hovered:
+            if self.ring.hover_start is None:
+                self.ring.hover_start = time.time()
+            elapsed = time.time() - self.ring.hover_start
+            if elapsed >= self.ring.duration:
+                self.ring.hover_start = None
                 return True
         else:
-            self.hold_start = None
-        
+            self.ring.hover_start = None
+            
         return False
-    
+        
     def draw(self, screen):
-        """Draw highly visible exit button"""
-        is_holding = self.hold_start is not None
+        """Draw highly visible elegant card button"""
+        is_hovering = self.ring.hover_start is not None
         
-        # Flashing red/dark red if holding
-        if is_holding:
-            flash = (time.time() * 10) % 2
-            bg_color = (200, 40, 40) if flash > 1 else (120, 20, 20)
-            border = (255, 100, 100)
-            text_color = (255, 255, 255)
-        else:
-            bg_color = (30, 35, 50)
-            border = (100, 120, 150)
-            text_color = (200, 210, 220)
-            
-        pygame.draw.rect(screen, bg_color, self.rect, border_radius=15)
-        pygame.draw.rect(screen, border, self.rect, 3 if is_holding else 2, border_radius=15)
+        # Color palettes
+        bg_col = (45, 25, 35) if is_hovering else (20, 22, 35)
+        border_col = (255, 60, 100) if is_hovering else (0, 180, 220)
+        text_col = (255, 255, 255) if is_hovering else (200, 220, 240)
         
-        # Text
-        txt = self.font.render("✊ EXIT TO MENU", True, text_color)
-        screen.blit(txt, txt.get_rect(center=(self.rect.centerx, self.rect.centery - 4)))
+        # Draw capsule
+        pygame.draw.rect(screen, bg_col, self.rect, border_radius=15)
+        pygame.draw.rect(screen, border_col, self.rect, 3 if is_hovering else 2, border_radius=15)
         
-        # Progress
-        if is_holding:
-            elapsed = time.time() - self.hold_start
-            progress = min(elapsed / self.duration, 1.0)
-            
-            bar_width = self.rect.width - 24
-            bar_height = 6
-            bar_x = self.rect.x + 12
-            bar_y = self.rect.bottom - 12
-            
-            pygame.draw.rect(screen, (50, 20, 20), (bar_x, bar_y, bar_width, bar_height), border_radius=3)
-            filled = int(bar_width * progress)
-            if filled > 0:
-                pygame.draw.rect(screen, (50, 255, 150), (bar_x, bar_y, filled, bar_height), border_radius=3)
+        # Text (emojis stripped to prevent ▢ rendering box)
+        txt = self.font.render("MAIN MENU", True, text_col)
+        screen.blit(txt, txt.get_rect(center=(self.rect.centerx + 20, self.rect.centery)))
+        
+        # Draw the SelectionRing inside the capsule
+        self.ring.draw(screen)
 
 # ============================================================================
 # MEDICAL SIDEBAR
@@ -1489,13 +1582,14 @@ class CloseButton:
         
         return False
     
-    def draw(self, screen, font, text="CLOSE", base_col=(60, 40, 40), hov_col=(100, 50, 50)):
+    def draw(self, screen, font, text="CLOSE", base_col=(60, 40, 40), hov_col=(100, 50, 50), border_col=None):
         """Draw button with custom text and colors"""
         is_hovering = self.hover_start is not None
         color = hov_col if is_hovering else base_col
+        current_border = border_col if border_col else COLOR_SECONDARY
         
         pygame.draw.rect(screen, color, self.rect, border_radius=10)
-        pygame.draw.rect(screen, COLOR_SECONDARY, self.rect, 3, border_radius=10)
+        pygame.draw.rect(screen, current_border, self.rect, 3, border_radius=10)
         
         # Text
         text_surf = font.render(text, True, COLOR_TEXT)
@@ -1515,7 +1609,7 @@ class CloseButton:
             pygame.draw.rect(screen, (50, 50, 50), (bar_x, bar_y, bar_width, bar_height), border_radius=4)
             filled = int(bar_width * progress)
             if filled > 0:
-                pygame.draw.rect(screen, COLOR_SECONDARY, (bar_x, bar_y, filled, bar_height), border_radius=4)
+                pygame.draw.rect(screen, current_border, (bar_x, bar_y, filled, bar_height), border_radius=4)
             
             # Percentage — use cached font
             _, _, font_hint, _ = _get_ui_fonts()
@@ -2014,10 +2108,10 @@ class PhysioSystem:
         # UI Elements
         # Age selection buttons (4 large cards) centered for 1280 WINDOW_WIDTH
         self.age_buttons = [
-            LevelButton(240, 150, 380, 180, "CHILDREN\n5-12 years\n🧒", 1),
-            LevelButton(660, 150, 380, 180, "YOUNG ADULTS\n18-35 years\n🎮", 2),
-            LevelButton(240, 380, 380, 180, "ADULTS\n35-60 years\n🧘", 3),
-            LevelButton(660, 380, 380, 180, "SENIORS\n60+ years\n👴", 4)
+            LevelButton(240, 150, 380, 180, "CHILDREN\n5-12 years", 1),
+            LevelButton(660, 150, 380, 180, "YOUNG ADULTS\n18-35 years", 2),
+            LevelButton(240, 380, 380, 180, "ADULTS\n35-60 years", 3),
+            LevelButton(660, 380, 380, 180, "SENIORS\n60+ years", 4)
         ]
         
         cx = GAME_AREA_WIDTH // 2
@@ -2026,16 +2120,25 @@ class PhysioSystem:
         col1_x = cx - bw - (gap // 2)
         col2_x = cx + (gap // 2)
         self.level_buttons = [
-            LevelButton(col1_x, 190, bw, 80, "LEVEL 1", 1),
-            LevelButton(col2_x, 190, bw, 80, "LEVEL 2", 2),
-            LevelButton(col1_x, 280, bw, 80, "LEVEL 3", 3),
-            LevelButton(col2_x, 280, bw, 80, "LEVEL 4", 4),
-            LevelButton(col1_x, 370, bw, 80, "LEVEL 5", 5),
-            LevelButton(col2_x, 370, bw, 80, "LEVEL 6", 6)
+            LevelButton(col1_x, 170, bw, 80, "LEVEL 1", 1, ring_radius=48),
+            LevelButton(col2_x, 170, bw, 80, "LEVEL 2", 2, ring_radius=48),
+            LevelButton(col1_x, 275, bw, 80, "LEVEL 3", 3, ring_radius=48),
+            LevelButton(col2_x, 275, bw, 80, "LEVEL 4", 4, ring_radius=48),
+            LevelButton(col1_x, 380, bw, 80, "LEVEL 5", 5, ring_radius=48),
+            LevelButton(col2_x, 380, bw, 80, "LEVEL 6", 6, ring_radius=48)
         ]
-        self.history_button = LevelButton(col1_x, 470, bw, 60, "📋 HISTORY", 9)
-        self.exit_button = LevelButton(col2_x, 470, bw, 60, "❌ EXIT SYSTEM", 99)
-        self.home_icon = HomeIcon(GAME_AREA_WIDTH - 210, 15, 200, 50)
+        # Adjusting positions to fit History, Calibration, Exit nicely side-by-side
+        self.history_button = LevelButton(cx - 410, 495, 260, 60, "RECOVERY HISTORY", 9, ring_radius=40)
+        self.calibrate_button = LevelButton(cx - 130, 495, 260, 60, "ROM DIAGNOSTICS", 8, ring_radius=40)
+        self.exit_button = LevelButton(cx + 150, 495, 260, 60, "EXIT SYSTEM", 99, ring_radius=40)
+        self.home_icon = HomeIcon(GAME_AREA_WIDTH - 250, 15, 240, 60)
+        
+        # Calibration state variables
+        self.calibrated_fist_val = 0.12       # default check threshold
+        self.calibrated_max_extension = 170.0  # default reach extension in pixels
+        self.calibrated_min_angle = 15.0      # min knuckle angle (fist)
+        self.calibrated_max_angle = 90.0      # max knuckle angle (open)
+        self.calibration_active = False       # whether calibration was completed
         
         # Game objects
         self.bubbles = []
@@ -2082,6 +2185,12 @@ class PhysioSystem:
         self.home_button  = CloseButton(cx + 0,   btn_y, bw, bh)
         self.close_button = CloseButton(cx + 180, btn_y, bw, bh)
         
+        # Calibration buttons
+        self.cal_start_button = CloseButton(GAME_AREA_WIDTH // 2 - 130, 460, 260, 60)
+        self.cal_start_button.duration = 1.5
+        self.cal_finish_button = CloseButton(GAME_AREA_WIDTH // 2 - 130, 540, 260, 60)
+        self.cal_finish_button.duration = 1.5
+        
         for b in [self.menu_button, self.next_button, self.home_button, self.close_button]:
             b.duration = 1.2
         self.session_data = None
@@ -2101,9 +2210,71 @@ class PhysioSystem:
         self.history_back_button = Button(20, WINDOW_HEIGHT - 60, 150, 45, "← BACK", (40, 60, 100))
         
     def run(self):
+        """Main application loop with initial splash screen"""
         try:
-            self.hand_engine.start()
+            # 1. INITIAL SPLASH SCREEN LOOP (while engine starts)
+            loading = True
+            start_time = time.time()
+            engine_started = False
+            engine_ready = False
+            engine_error = False
             
+            # Status messages for the medical splash
+            status_msgs = [
+                "BOOTING CLINICAL CORE...",
+                "INITIALIZING NEURAL INTERFACE...",
+                "CALIBRATING OPTICAL SENSORS...",
+                "SYNCING PATIENT DATABASE...",
+                "BIO-FEEDBACK ENGINE ONLINE.",
+                "SYSTEM READY."
+            ]
+            
+            while loading and self.running:
+                # Handle events
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        self.running = False
+                        loading = False
+                    if event.type == pygame.KEYDOWN and engine_error:
+                        # Allow skipping splash if camera failed
+                        loading = False
+                
+                # Start engine
+                if not engine_started:
+                    self.hand_engine.start()
+                    engine_started = True
+                
+                # Progress
+                elapsed = time.time() - start_time
+                progress = min(1.0, elapsed / 3.5)
+                
+                # Readiness check
+                engine_ready = False
+                engine_error = False
+                
+                if self.hand_engine.webcam:
+                    # Check background initialization status
+                    if getattr(self.hand_engine.webcam, 'init_done', False):
+                        if getattr(self.hand_engine.webcam, 'init_error', False):
+                            engine_error = True
+                        else:
+                            with self.hand_engine.lock:
+                                if self.hand_engine.mirrored_frame is not None:
+                                    engine_ready = True
+                else:
+                    engine_error = True
+                
+                # Finish loading
+                if progress >= 1.0 and engine_ready:
+                    loading = False
+                # Auto-proceed after 8s even if error (keyboard fallback)
+                if engine_error and elapsed > 8.0:
+                    loading = False
+                
+                self._draw_initial_splash(progress, status_msgs, engine_error)
+                self.clock.tick(60)
+
+            # 2. MAIN APPLICATION LOOP
             while self.running:
                 self._handle_events()
                 self._update()
@@ -2117,6 +2288,93 @@ class PhysioSystem:
             except:
                 pass
             pygame.quit()
+
+    def _draw_initial_splash(self, progress: float, messages: list, has_error: bool = False):
+        """Premium medical-themed startup animation"""
+        self.screen.fill((4, 8, 15)) # Deep space black/blue
+        cx, cy = WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2
+        t = time.time()
+
+        # --- Tech Background Grid ---
+        grid_color = (15, 25, 40)
+        for x in range(0, WINDOW_WIDTH, 40):
+            pygame.draw.line(self.screen, grid_color, (x, 0), (x, WINDOW_HEIGHT), 1)
+        for y in range(0, WINDOW_HEIGHT, 40):
+            pygame.draw.line(self.screen, grid_color, (0, y), (WINDOW_WIDTH, y), 1)
+
+        # --- Moving Scanline ---
+        scan_y = int((t * 200) % WINDOW_HEIGHT)
+        pygame.draw.line(self.screen, (0, 150, 100, 60), (0, scan_y), (WINDOW_WIDTH, scan_y), 2)
+
+        # --- Central Neural Hub Animation ---
+        # Pulsing Glow
+        glow_size = int(150 + 20 * math.sin(t * 4))
+        glow_surf = pygame.Surface((glow_size * 2, glow_size * 2), pygame.SRCALPHA)
+        pygame.draw.circle(glow_surf, (0, 100, 255, 30), (glow_size, glow_size), glow_size)
+        self.screen.blit(glow_surf, (cx - glow_size, cy - glow_size))
+
+        # Rotating Hexagons
+        for i in range(3):
+            angle = t * (i + 1) * 0.5
+            pts = []
+            r = 80 + i * 30
+            for j in range(6):
+                a = angle + j * (math.pi / 3)
+                pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+            pygame.draw.polygon(self.screen, (0, 200, 255), pts, 2)
+
+        # Inner pulsing core
+        core_r = int(40 + 5 * math.sin(t * 8))
+        pygame.draw.circle(self.screen, (0, 255, 180), (cx, cy), core_r, 3)
+        pygame.draw.circle(self.screen, (255, 255, 255), (cx, cy), 10)
+
+        # --- Progress Bar ---
+        bar_w, bar_h = 400, 10
+        bar_x, bar_y = cx - bar_w // 2, cy + 180
+        pygame.draw.rect(self.screen, (20, 30, 50), (bar_x, bar_y, bar_w, bar_h), border_radius=5)
+        pygame.draw.rect(self.screen, (0, 255, 150), (bar_x, bar_y, int(bar_w * progress), bar_h), border_radius=5)
+        
+        # Glow for bar
+        if progress > 0:
+            pygame.draw.rect(self.screen, (0, 255, 150), (bar_x, bar_y, int(bar_w * progress), bar_h), 2, border_radius=5)
+
+        # --- Loading Text Log ---
+        log_idx = min(int(progress * len(messages)), len(messages) - 1)
+        for i in range(log_idx + 1):
+            alpha = 255 if i == log_idx else 100
+            msg = messages[i]
+            if i == log_idx:
+                # Add flickering cursor to current line
+                if int(t * 4) % 2 == 0: msg += " _"
+            
+            txt = self.font_hint.render(msg, True, (0, 255, 180))
+            txt.set_alpha(alpha)
+            self.screen.blit(txt, (50, 50 + i * 25))
+
+        # --- Error Warning ---
+        if has_error:
+            err_surf = pygame.Surface((500, 100), pygame.SRCALPHA)
+            err_surf.fill((100, 0, 0, 180))
+            self.screen.blit(err_surf, (WINDOW_WIDTH//2 - 250, WINDOW_HEIGHT - 180))
+            pygame.draw.rect(self.screen, (255, 50, 50), (WINDOW_WIDTH//2 - 250, WINDOW_HEIGHT - 180, 500, 100), 2)
+            
+            e_txt1 = self.font_small.render("CAMERA NOT DETECTED", True, (255, 200, 200))
+            e_txt2 = self.font_hint.render("System will run in Keyboard Fallback Mode.", True, (255, 255, 255))
+            e_txt3 = self.font_tiny.render("Press any key to continue...", True, (200, 200, 200))
+            
+            self.screen.blit(e_txt1, e_txt1.get_rect(center=(WINDOW_WIDTH//2, WINDOW_HEIGHT - 150)))
+            self.screen.blit(e_txt2, e_txt2.get_rect(center=(WINDOW_WIDTH//2, WINDOW_HEIGHT - 125)))
+            self.screen.blit(e_txt3, e_txt3.get_rect(center=(WINDOW_WIDTH//2, WINDOW_HEIGHT - 100)))
+
+        # --- Percentage ---
+        pct_txt = self.font_medium.render(f"{int(progress * 100)}%", True, (255, 255, 255))
+        self.screen.blit(pct_txt, pct_txt.get_rect(center=(cx, bar_y + 40)))
+
+        # --- Branded Footer ---
+        footer = self.font_tiny.render("AI PHYSIOTHERAPY SYSTEM v2.0 | ZERO-KEYBOARD CLINICAL INTERFACE", True, (60, 90, 120))
+        self.screen.blit(footer, footer.get_rect(center=(cx, WINDOW_HEIGHT - 30)))
+
+        pygame.display.flip()
     
     def _handle_events(self):
         for event in pygame.event.get():
@@ -2183,14 +2441,30 @@ class PhysioSystem:
                 elif self.warning_timer <= 0:
                     self.correctness_warning = ""
         
-        # Check home icon (pause/quit)
+        # Check home icon (pause/quit) - Double-Trigger Exit
         if self.state not in [GameState.MAIN_MENU, GameState.RESULTS,
                                GameState.LEVEL_COMPLETE, GameState.PAIN_SCALE,
                                GameState.HISTORY, GameState.PATIENT_REGISTRATION,
-                               GameState.AGE_SELECT]:
-            if self.home_icon.update(hand_data.is_fist, hand_data.index_tip):
+                               GameState.AGE_SELECT, GameState.CLOUD_SYNC, GameState.CALIBRATION, GameState.THERAPIST_DASHBOARD]:
+            # Trigger 1: Hover-to-Select on HomeIcon
+            home_hover_exit = self.home_icon.update(hand_data.is_fist, hand_data.index_tip)
+            
+            # Trigger 2: Global Fist hold countdown anywhere on the screen
+            global_fist_exit = False
+            if hand_data.is_fist:
+                if not hasattr(self, '_global_fist_start') or self._global_fist_start is None:
+                    self._global_fist_start = time.time()
+                elapsed = time.time() - self._global_fist_start
+                if elapsed >= 2.0:
+                    global_fist_exit = True
+                    self._global_fist_start = None
+            else:
+                self._global_fist_start = None
+                
+            if home_hover_exit or global_fist_exit:
                 self.state = GameState.MAIN_MENU
                 self._reset_game()
+                self._global_fist_start = None
         
         # Check tracking & Freeze Timer
         is_playing = self.state in [GameState.LEVEL1_FLEXIBILITY, GameState.LEVEL2_STRENGTH, 
@@ -2220,6 +2494,8 @@ class PhysioSystem:
             self._update_pain_scale(hand_data)
         elif self.state == GameState.HISTORY:
             self._update_history(hand_data)
+        elif self.state == GameState.CALIBRATION:
+            self._update_calibration(hand_data)
         elif self.state == GameState.LEVEL1_FLEXIBILITY:
             if not getattr(self, 'tracking_lost', False):
                 self._update_level1(hand_data)
@@ -2300,10 +2576,11 @@ class PhysioSystem:
                 break
     
     def _update_patient_registration(self, hand_data: HandData):
-        if hasattr(self, 'quick_start_button') and not self.patient_name:
+        if hasattr(self, 'quick_start_button'):
             if self.quick_start_button.update(hand_data.index_tip):
-                self.patient_name = "Quick Guest"
-                self.patient_age = "30"
+                if not self.patient_name or not self.patient_age:
+                    self.patient_name = "Quick Guest"
+                    self.patient_age = "30"
                 self._submit_registration()
                 self.quick_start_button.hover_start = None
 
@@ -2333,6 +2610,13 @@ class PhysioSystem:
             self.running = False
             return
             
+        # Calibration button
+        if hasattr(self, 'calibrate_button') and self.calibrate_button.update(hand_data.index_tip):
+            self.state = GameState.CALIBRATION
+            self._init_calibration()
+            self.sounds.play('select')
+            return
+
         # History button
         if self.history_button.update(hand_data.index_tip):
             self.state = GameState.HISTORY
@@ -2720,6 +3004,8 @@ class PhysioSystem:
             self._draw_pain_scale()
         elif self.state == GameState.HISTORY:
             self._draw_history()
+        elif self.state == GameState.CALIBRATION:
+            self._draw_calibration()
         elif self.state == GameState.LEVEL1_FLEXIBILITY:
             self._draw_level1()
         elif self.state == GameState.LEVEL2_STRENGTH:
@@ -2742,7 +3028,7 @@ class PhysioSystem:
             self._draw_therapist_dashboard()
         
         # Draw sidebar (not for full-screen states)
-        _no_sidebar = [GameState.RESULTS, GameState.AGE_SELECT,
+        _no_sidebar = [GameState.AGE_SELECT,
                        GameState.PATIENT_REGISTRATION, GameState.LEVEL_COMPLETE,
                        GameState.PAIN_SCALE, GameState.HISTORY, GameState.CLOUD_SYNC,
                        GameState.THERAPIST_DASHBOARD]
@@ -2803,7 +3089,7 @@ class PhysioSystem:
                 pygame.draw.rect(self.screen, (20, 10, 15), box_rect, border_radius=15)
                 pygame.draw.rect(self.screen, (255, 100, 100), box_rect, 4, border_radius=15)
                 
-                warn_text = self.font_large.render("⚠️ SYSTEM PAUSED ⚠️", True, (255, 60, 60))
+                warn_text = self.font_large.render("SYSTEM PAUSED", True, (255, 60, 60))
                 self.screen.blit(warn_text, warn_text.get_rect(center=(box_x + box_w//2, box_y + 80)))
                 
                 sub_text = self.font_medium.render("PLEASE RETURN HAND TO CAMERA VIEW", True, (255, 255, 255))
@@ -2865,6 +3151,46 @@ class PhysioSystem:
                 pygame.draw.line(self._scanline_surf, (0, 0, 0, 35), (0, i), (WINDOW_WIDTH, i))
         self.screen.blit(self._scanline_surf, (0, 0))
 
+        # Draw Global Fist-Hold Exit Overlay
+        if hasattr(self, '_global_fist_start') and self._global_fist_start is not None:
+            elapsed = time.time() - self._global_fist_start
+            progress = min(elapsed / 2.0, 1.0)
+            if progress > 0.05:
+                # Dim background
+                dim_surf = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
+                dim_surf.fill((10, 10, 20, 180))
+                self.screen.blit(dim_surf, (0, 0))
+                
+                # Glowing center box
+                box_w, box_h = 600, 300
+                box_x = (WINDOW_WIDTH - box_w) // 2
+                box_y = (WINDOW_HEIGHT - box_h) // 2
+                pygame.draw.rect(self.screen, (20, 25, 45), (box_x, box_y, box_w, box_h), border_radius=20)
+                pygame.draw.rect(self.screen, (255, 60, 100), (box_x, box_y, box_w, box_h), 4, border_radius=20)
+                
+                # Ring gauge in center of box
+                cx = box_x + box_w // 2
+                cy = box_y + box_h // 2 + 30
+                radius = 50
+                pygame.draw.circle(self.screen, (40, 45, 65), (cx, cy), radius, 8)
+                
+                start_a = math.radians(-90)
+                end_a = math.radians(-90 + 360 * progress)
+                arc_surf = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
+                pygame.draw.arc(arc_surf, (255, 60, 100), (0, 0, radius * 2, radius * 2), start_a, end_a, 10)
+                self.screen.blit(arc_surf, (cx - radius, cy - radius))
+                
+                # Text inside ring
+                rem = max(0.0, 2.0 - elapsed)
+                cd_t = self.font_cd.render(f"{rem:.1f}s", True, (255, 255, 255))
+                self.screen.blit(cd_t, cd_t.get_rect(center=(cx, cy)))
+                
+                # Heading
+                h_t = self.font_medium.render("HOLDING FIST TO EXIT", True, (255, 60, 100))
+                self.screen.blit(h_t, h_t.get_rect(center=(cx, box_y + 40)))
+                sub_t = self.font_small.render("Keep hand closed to return to Main Menu", True, (180, 200, 220))
+                self.screen.blit(sub_t, sub_t.get_rect(center=(cx, box_y + 85)))
+
         pygame.display.flip()
     
     def _draw_camera_preview(self, x, y, w, h, label="SYSTEM CAMERA"):
@@ -2910,9 +3236,11 @@ class PhysioSystem:
         # ── Background (Deep Clinical Blue/Black) ──────────────────────
         scr.fill((4, 8, 16)) # Very dark
         
-        # ── Animated Scanning Line ────────────────────────────────────
-        scan_y = int((t * 150) % WINDOW_HEIGHT)
-        pygame.draw.line(scr, (0, 180, 120, 40), (0, scan_y), (WINDOW_WIDTH, scan_y), 3)
+        # ── Animated Scanning Line (Smooth Multi-Shade Glow) ──────────
+        scan_y = int((t * 120) % WINDOW_HEIGHT)
+        pygame.draw.line(scr, (0, 255, 200), (0, scan_y), (WINDOW_WIDTH, scan_y), 2)
+        pygame.draw.line(scr, (0, 180, 120), (0, scan_y - 1), (WINDOW_WIDTH, scan_y - 1), 1)
+        pygame.draw.line(scr, (0, 180, 120), (0, scan_y + 2), (WINDOW_WIDTH, scan_y + 2), 1)
         
         # ── Slim Cyber Header ──────────────────────────────────────────
         pygame.draw.rect(scr, (8, 12, 24), pygame.Rect(0, 0, WINDOW_WIDTH, 70))
@@ -2931,16 +3259,31 @@ class PhysioSystem:
         panel_rect = pygame.Rect(cam_x - 10, cam_y - 10, cam_w + 20, cam_h + 60)
         pygame.draw.rect(scr, (6, 10, 18), panel_rect, border_radius=8)
         pygame.draw.rect(scr, (0, 150, 120), panel_rect, 2, border_radius=8)
+
+        # Tech corners for camera panel
+        l = 20
+        # Top-Left
+        pygame.draw.line(scr, (0, 255, 200), (panel_rect.x, panel_rect.y), (panel_rect.x + l, panel_rect.y), 3)
+        pygame.draw.line(scr, (0, 255, 200), (panel_rect.x, panel_rect.y), (panel_rect.x, panel_rect.y + l), 3)
+        # Top-Right
+        pygame.draw.line(scr, (0, 255, 200), (panel_rect.right, panel_rect.y), (panel_rect.right - l, panel_rect.y), 3)
+        pygame.draw.line(scr, (0, 255, 200), (panel_rect.right, panel_rect.y), (panel_rect.right, panel_rect.y + l), 3)
+        # Bottom-Left
+        pygame.draw.line(scr, (0, 255, 200), (panel_rect.x, panel_rect.bottom), (panel_rect.x + l, panel_rect.bottom), 3)
+        pygame.draw.line(scr, (0, 255, 200), (panel_rect.x, panel_rect.bottom), (panel_rect.x, panel_rect.bottom - l), 3)
+        # Bottom-Right
+        pygame.draw.line(scr, (0, 255, 200), (panel_rect.right, panel_rect.bottom), (panel_rect.right - l, panel_rect.bottom), 3)
+        pygame.draw.line(scr, (0, 255, 200), (panel_rect.right, panel_rect.bottom), (panel_rect.right, panel_rect.bottom - l), 3)
         
         # Draw camera frame
         self._draw_camera_preview(cam_x, cam_y, cam_w, cam_h, "HIGH-RES NEURAL SENSOR")
         
-        # Display hand type in diagnostics
+        # Display hand type in diagnostics - shifted down to avoid overlapping the camera label
         hand_data = self.hand_engine.get_hand_data()
         hand_txt = f"SENSE: {hand_data.hand_label.upper()} HAND DETECTED" if hand_data.hand_label != "Unknown" else "AWAITING HAND CALIBRATION..."
         diag_col = (0, 255, 150) if hand_data.hand_label != "Unknown" else (255, 180, 0)
         diag_txt = self.font_small.render(f"STATUS: {hand_txt}", True, diag_col)
-        scr.blit(diag_txt, (cam_x, cam_y + cam_h + 15))
+        scr.blit(diag_txt, (cam_x, cam_y + cam_h + 32))
 
         # ── Input Fields (Left Side) ──────────────────────────────────
         left_x = 50
@@ -2953,11 +3296,19 @@ class PhysioSystem:
         
         name_box = pygame.Rect(left_x, y_start+25, input_w, 50)
         pygame.draw.rect(scr, (8, 14, 20), name_box, border_radius=6)
-        pygame.draw.rect(scr, name_col, name_box, 2, border_radius=6)
+        
+        if name_active:
+            # High-tech Sci-Fi active glow borders
+            pygame.draw.rect(scr, (0, 255, 200), name_box, 2, border_radius=6)
+            pygame.draw.rect(scr, (0, 150, 120), name_box.inflate(-2, -2), 1, border_radius=5)
+        else:
+            pygame.draw.rect(scr, (40, 60, 80), name_box, 1, border_radius=6)
         
         d_name = self.patient_name + ("_" if name_active and int(t*2)%2==0 else "")
         ns = self.font_medium.render(d_name or "Enter Name...", True, (255, 255, 255) if self.patient_name else (80, 80, 80))
-        scr.blit(ns, (name_box.x+15, name_box.y+6))
+        # Center name text perfectly in the vertical center of the input box
+        ns_rect = ns.get_rect(midleft=(name_box.x + 15, name_box.centery))
+        scr.blit(ns, ns_rect)
 
         # Patient Age Field
         y_age = y_start + 110
@@ -2967,11 +3318,19 @@ class PhysioSystem:
         
         age_box = pygame.Rect(left_x, y_age+25, input_w // 2, 50)
         pygame.draw.rect(scr, (8, 14, 20), age_box, border_radius=6)
-        pygame.draw.rect(scr, age_col, age_box, 2, border_radius=6)
+        
+        if age_active:
+            # High-tech Sci-Fi active glow borders
+            pygame.draw.rect(scr, (0, 255, 200), age_box, 2, border_radius=6)
+            pygame.draw.rect(scr, (0, 150, 120), age_box.inflate(-2, -2), 1, border_radius=5)
+        else:
+            pygame.draw.rect(scr, (40, 60, 80), age_box, 1, border_radius=6)
         
         d_age = self.patient_age + ("_" if age_active and int(t*2)%2==0 else "")
         as_ = self.font_medium.render(d_age or "00", True, (255, 255, 255) if self.patient_age else (80, 80, 80))
-        scr.blit(as_, (age_box.x+15, age_box.y+6))
+        # Center age text perfectly in the vertical center of the input box
+        as_rect = as_.get_rect(midleft=(age_box.x + 15, age_box.centery))
+        scr.blit(as_, as_rect)
 
         # Automatic Mode Tag
         if self.patient_age.isdigit():
@@ -2981,7 +3340,8 @@ class PhysioSystem:
             elif age > 60: label, lcol = "GERIATRIC CARE", (255, 200, 100)
             
             mode_tag = self.font_small.render(f"[{label}]", True, lcol)
-            scr.blit(mode_tag, (left_x + input_w // 2 + 15, y_age+35))
+            # Center mode tag perfectly centered vertically next to the age box
+            scr.blit(mode_tag, mode_tag.get_rect(midleft=(left_x + input_w // 2 + 15, age_box.centery)))
 
         # ── Medical Sub-Panel ──────────────────────────────────────────
         y_info = y_age + 110
@@ -3000,15 +3360,20 @@ class PhysioSystem:
         scr.blit(c_surf, c_surf.get_rect(center=(left_x + input_w // 2, y_info + 165)))
 
         btn_rect = pygame.Rect(left_x, y_info + 190, input_w, 60)
-        if self.patient_name and self.patient_age:
-            pygame.draw.rect(scr, (0, 150, 100), btn_rect, border_radius=8)
-            pygame.draw.rect(scr, (0, 255, 150), btn_rect, 2, border_radius=8)
-            b_txt = self.font_medium.render("INITIATE REHABILITATION", True, (255, 255, 255))
-            scr.blit(b_txt, b_txt.get_rect(center=btn_rect.center))
-        else:
-            if hasattr(self, 'quick_start_button'):
-                self.quick_start_button.rect = btn_rect
-                self.quick_start_button.draw(scr, self.font_small, "QUICK START", base_col=(30, 40, 50), hov_col=(0, 150, 200))
+        
+        # Unify button rendering using CloseButton for both empty and filled states to support hover click operations
+        if hasattr(self, 'quick_start_button'):
+            self.quick_start_button.rect = btn_rect
+            if self.patient_name and self.patient_age:
+                self.quick_start_button.draw(
+                    scr, self.font_medium, "INITIATE REHABILITATION", 
+                    base_col=(0, 100, 70), hov_col=(0, 150, 100), border_col=(0, 255, 150)
+                )
+            else:
+                self.quick_start_button.draw(
+                    scr, self.font_medium, "QUICK START", 
+                    base_col=(30, 40, 55), hov_col=(0, 120, 180), border_col=(0, 180, 220)
+                )
 
         # Cursor
         hand_data = self.hand_engine.get_hand_data()
@@ -3078,14 +3443,14 @@ class PhysioSystem:
             welcome_rect = welcome.get_rect(center=(GAME_AREA_WIDTH // 2, 140))
             self.screen.blit(welcome, welcome_rect)
 
-        # Update level button labels to theme names
+        # Update level button labels to theme names (emojis stripped for system font compatibility)
         level_names = [
-            f"{theme['level1_icon']} {theme['level1_name']}",
-            f"{theme['level2_icon']} {theme['level2_name']}",
-            f"{theme['level3_icon']} {theme['level3_name']}",
-            f"{theme.get('level4_icon', '✨')} {theme.get('level4_name', 'Magic Trace')}",
-            f"{theme.get('level5_icon', '🎈')} {theme.get('level5_name', 'Balloon Pump')}",
-            f"{theme.get('level6_icon', '🎹')} {theme.get('level6_name', 'Piano Play')}",
+            theme['level1_name'],
+            theme['level2_name'],
+            theme['level3_name'],
+            theme.get('level4_name', 'Magic Trace'),
+            theme.get('level5_name', 'Balloon Pump'),
+            theme.get('level6_name', 'Piano Play'),
         ]
         for i, button in enumerate(self.level_buttons):
             if i < len(level_names):
@@ -3094,18 +3459,20 @@ class PhysioSystem:
 
         # Instructions
         inst = self.font_small.render("Hover your finger over a level to select", True, COLOR_TEXT)
-        inst_rect = inst.get_rect(center=(GAME_AREA_WIDTH // 2, 580))
+        inst_rect = inst.get_rect(center=(GAME_AREA_WIDTH // 2, 605))
         self.screen.blit(inst, inst_rect)
 
-        # History and Exit buttons
+        # History, Calibration, and Exit utility buttons
         self.history_button.draw(self.screen, self.font_small, base_col=(30, 80, 150), hov_col=(50, 120, 200))
+        if hasattr(self, 'calibrate_button'):
+            self.calibrate_button.draw(self.screen, self.font_small, base_col=(120, 60, 140), hov_col=(160, 80, 180))
         if hasattr(self, 'exit_button'):
             self.exit_button.draw(self.screen, self.font_small, base_col=(180, 40, 40), hov_col=(255, 60, 60))
     
     def _draw_level1(self):
         theme = self._get_theme()
         primary = theme["primary_color"]
-        level_name = f"{theme['level1_icon']} {theme['level1_name']}"
+        level_name = theme['level1_name']
 
         # Title (pushed down to clear HUD bar)
         title = self.font_medium.render(f"LEVEL 1: {level_name}", True, primary)
@@ -3139,7 +3506,7 @@ class PhysioSystem:
     def _draw_level2(self):
         theme = self._get_theme()
         primary = theme["primary_color"]
-        level_name = f"{theme['level2_icon']} {theme['level2_name']}"
+        level_name = theme['level2_name']
 
         # Title pushed lower
         title = self.font_medium.render(f"LEVEL 2: {level_name}", True, primary)
@@ -3194,7 +3561,7 @@ class PhysioSystem:
     def _draw_level3(self):
         theme = self._get_theme()
         primary = theme["primary_color"]
-        level_name = f"{theme['level3_icon']} {theme['level3_name']}"
+        level_name = theme['level3_name']
 
         # Title pushed lower
         title = self.font_medium.render(f"LEVEL 3: {level_name}", True, primary)
@@ -3233,7 +3600,7 @@ class PhysioSystem:
         """Draw Tracing Level"""
         theme = self._get_theme()
         primary = theme["primary_color"]
-        level_name = f"{theme.get('level4_icon', '✨')} {theme.get('level4_name', 'Magic Trace')}"
+        level_name = theme.get('level4_name', 'Magic Trace')
 
         title = self.font_medium.render(f"LEVEL 4: {level_name}", True, primary)
         self.screen.blit(title, (50, 75))
@@ -3284,7 +3651,7 @@ class PhysioSystem:
         """Draw Grip & Release Level"""
         theme = self._get_theme()
         primary = theme["primary_color"]
-        level_name = f"{theme.get('level5_icon', '🎈')} {theme.get('level5_name', 'Balloon Pump')}"
+        level_name = theme.get('level5_name', 'Balloon Pump')
 
         title = self.font_medium.render(f"LEVEL 5: {level_name}", True, primary)
         self.screen.blit(title, (50, 75))
@@ -3329,7 +3696,7 @@ class PhysioSystem:
         """Draw Memory Sequence Level"""
         theme = self._get_theme()
         primary = theme["primary_color"]
-        level_name = f"{theme.get('level6_icon', '🧠')} {theme.get('level6_name', 'Memory Sequence')}"
+        level_name = theme.get('level6_name', 'Memory Sequence')
 
         title = self.font_medium.render(f"LEVEL 6: {level_name}", True, primary)
         self.screen.blit(title, (50, 75))
@@ -4065,7 +4432,244 @@ class PhysioSystem:
         self.history_back_button.draw(self.screen, self.font_tiny)
         self._draw_cursor(hand_data)
 
+    def _init_calibration(self):
+        self.calibration_stage = "START"
+        self.calibration_timer = 0
+        self.calibration_countdown = 3.0
+        self.calibration_stage_start = time.time()
+        self.cal_finger_extensions = []
+        self.cal_knuckle_angles = []
+        self.cal_fist_distances = []
+        VOICE.speak("Welcome to the Hand Diagnostics and Range of Motion Calibration Test.")
 
+    def _update_calibration(self, hand_data: HandData):
+        """Update loop for ROM Diagnostics & Calibration"""
+        if self.calibration_stage == "START":
+            if self.cal_start_button.update(hand_data.index_tip):
+                self.calibration_stage = "OPEN_HAND"
+                self.calibration_stage_start = time.time()
+                self.cal_finger_extensions.clear()
+                self.cal_knuckle_angles.clear()
+                VOICE.speak("Stage 1: Open your hand as wide as possible and hold.")
+                self.cal_start_button.hover_start = None
+                
+        elif self.calibration_stage == "OPEN_HAND":
+            elapsed = time.time() - self.calibration_stage_start
+            if hand_data.finger_extension > 0:
+                self.cal_finger_extensions.append(hand_data.finger_extension)
+            if hand_data.knuckle_angles and len(hand_data.knuckle_angles) > 0:
+                self.cal_knuckle_angles.append(hand_data.knuckle_angles[0])
+                
+            if elapsed >= 3.5:
+                if self.cal_finger_extensions:
+                    self.temp_max_extension = np.percentile(self.cal_finger_extensions, 90)
+                else:
+                    self.temp_max_extension = 170.0
+                    
+                if self.cal_knuckle_angles:
+                    self.temp_max_angle = np.percentile(self.cal_knuckle_angles, 90)
+                else:
+                    self.temp_max_angle = 90.0
+                    
+                self.calibration_stage = "MAKE_FIST"
+                self.calibration_stage_start = time.time()
+                self.cal_fist_distances.clear()
+                self.cal_knuckle_angles.clear()
+                VOICE.speak("Stage 2: Now, close your hand into a tight fist.")
+                
+        elif self.calibration_stage == "MAKE_FIST":
+            elapsed = time.time() - self.calibration_stage_start
+            
+            # Read landmarks from hand engine for precise fist closeness
+            with self.hand_engine.lock:
+                frame_landmarks = self.hand_engine.hand_data.landmarks
+            if frame_landmarks and len(frame_landmarks) > 0 and frame_landmarks[0] is not None:
+                landmarks = frame_landmarks[0]
+                wrist = landmarks.landmark[0]
+                middle_mcp = landmarks.landmark[9]
+                index_tip = landmarks.landmark[8]
+                middle_tip = landmarks.landmark[12]
+                ring_tip = landmarks.landmark[16]
+                pinky_tip = landmarks.landmark[20]
+                avg_finger_y = (index_tip.y + middle_tip.y + ring_tip.y + pinky_tip.y) / 4
+                palm_y = (wrist.y + middle_mcp.y) / 2
+                fist_dist = abs(avg_finger_y - palm_y)
+                self.cal_fist_distances.append(fist_dist)
+                
+            if hand_data.knuckle_angles and len(hand_data.knuckle_angles) > 0:
+                self.cal_knuckle_angles.append(hand_data.knuckle_angles[0])
+                
+            if elapsed >= 3.5:
+                if self.cal_fist_distances:
+                    raw_val = np.percentile(self.cal_fist_distances, 15)
+                    self.calibrated_fist_val = float(np.clip(raw_val, 0.08, 0.18))
+                else:
+                    self.calibrated_fist_val = 0.12
+                    
+                if self.cal_knuckle_angles:
+                    self.calibrated_min_angle = float(np.percentile(self.cal_knuckle_angles, 15))
+                else:
+                    self.calibrated_min_angle = 15.0
+                    
+                self.calibrated_max_extension = float(max(120.0, self.temp_max_extension))
+                self.calibrated_max_angle = float(max(100.0, self.temp_max_angle))
+                
+                # Apply new thresholds to HandEngine
+                self.hand_engine.fist_threshold = self.calibrated_fist_val
+                self.hand_engine.calibration_active = True
+                self.hand_engine.calibrated_max_extension = self.calibrated_max_extension
+                self.calibration_active = True
+                
+                self.calibration_stage = "COMPLETE"
+                VOICE.speak("Diagnostics complete. Game difficulty dynamically scaled to match your mobility.")
+                
+        elif self.calibration_stage == "COMPLETE":
+            if self.cal_finish_button.update(hand_data.index_tip):
+                self.state = GameState.MAIN_MENU
+                self.cal_finish_button.hover_start = None
+                self.sounds.play('pop')
+
+    def _draw_calibration(self):
+        """Draw ROM Calibration and Diagnostics interface"""
+        self.screen.fill((8, 14, 30))
+        cx = GAME_AREA_WIDTH // 2
+        
+        # Draw tech background grids
+        self._draw_cyber_grid()
+        
+        title_surf = self.font_large.render("HAND DIAGNOSTICS & CALIBRATION", True, (0, 200, 255))
+        self.screen.blit(title_surf, title_surf.get_rect(center=(cx, 45)))
+        pygame.draw.line(self.screen, (0, 150, 200), (0, 80), (GAME_AREA_WIDTH, 80), 2)
+        
+        prev_x, prev_y = GAME_AREA_WIDTH - 360, 100
+        prev_w, prev_h = 340, 260
+        self._draw_camera_preview(prev_x, prev_y, prev_w, prev_h, label="DIAGNOSTIC SCANNER")
+        
+        panel_rect = pygame.Rect(20, 100, GAME_AREA_WIDTH - 400, WINDOW_HEIGHT - 130)
+        pygame.draw.rect(self.screen, (10, 20, 45), panel_rect, border_radius=12)
+        pygame.draw.rect(self.screen, (0, 120, 200), panel_rect, 2, border_radius=12)
+        
+        hand_data = self.hand_engine.get_hand_data()
+        
+        if self.calibration_stage == "START":
+            y = 130
+            text_1 = self.font_head.render("DAILY MOBILITY BASELINE TEST", True, COLOR_SUCCESS)
+            self.screen.blit(text_1, (50, y))
+            y += 45
+            
+            desc_lines = [
+                "This assessment calibrates the computer vision engine",
+                "to match your hand's exact flexibility.",
+                "",
+                "By measuring your individual range of motion, the system:",
+                " 1. Dynamically scales game reach zones.",
+                " 2. Calibrates gesture detection sensitivity.",
+                " 3. Adapts speed to minimize fatigue.",
+                "",
+                "Recommended at the start of each daily session."
+            ]
+            for line in desc_lines:
+                ts = self.font_hint.render(line, True, (180, 200, 220))
+                self.screen.blit(ts, (50, y))
+                y += 24
+                
+            self.cal_start_button.draw(self.screen, self.font_small, text="BEGIN ASSESSMENT", base_col=(25,45,35), hov_col=(40,90,60))
+            
+        elif self.calibration_stage in ["OPEN_HAND", "MAKE_FIST"]:
+            elapsed = time.time() - self.calibration_stage_start
+            countdown = max(0.0, 3.0 - elapsed)
+            
+            y = 130
+            title_text = "STAGE 1: EXTENSION ASSESSMENT" if self.calibration_stage == "OPEN_HAND" else "STAGE 2: FLEXION ASSESSMENT"
+            instruct_text = "Spread your fingers and open hand fully!" if self.calibration_stage == "OPEN_HAND" else "Make a tight fist!"
+            icon_char = "OPEN HAND" if self.calibration_stage == "OPEN_HAND" else "CLOSED FIST"
+            
+            tx = self.font_head.render(title_text, True, COLOR_PRIMARY)
+            self.screen.blit(tx, (50, y))
+            y += 50
+            
+            ix = self.font_medium.render(icon_char, True, (255, 255, 255))
+            self.screen.blit(ix, (50, y))
+            
+            inst_surf = self.font_small.render(instruct_text, True, (200, 220, 240))
+            self.screen.blit(inst_surf, (50, y + 45))
+            y += 85
+            
+            if hand_data.knuckle_angles and len(hand_data.knuckle_angles) > 0:
+                angle_val = hand_data.knuckle_angles[0]
+            else:
+                angle_val = 0.0
+                
+            val_str = f"Extension Reach: {hand_data.finger_extension:.0f}px" if self.calibration_stage == "OPEN_HAND" else f"Knuckle Flexion: {angle_val:.1f}°"
+            vx = self.font_hud.render(val_str, True, COLOR_WARNING)
+            self.screen.blit(vx, (50, y))
+            y += 40
+            
+            cx_gauge = panel_rect.x + panel_rect.width // 2
+            cy_gauge = y + 80
+            pygame.draw.circle(self.screen, (25, 35, 60), (cx_gauge, cy_gauge), 70, 6)
+            
+            time_prog = min(elapsed / 3.0, 1.0)
+            start_a = math.radians(-90)
+            end_a = math.radians(-90 + 360 * time_prog)
+            arc_s = pygame.Surface((140, 140), pygame.SRCALPHA)
+            pygame.draw.arc(arc_s, COLOR_SUCCESS, (0, 0, 140, 140), start_a, end_a, 8)
+            self.screen.blit(arc_s, (cx_gauge - 70, cy_gauge - 70))
+            
+            cd_surf = self.font_large.render(f"{int(countdown)+1}", True, (255, 255, 255))
+            self.screen.blit(cd_surf, cd_surf.get_rect(center=(cx_gauge, cy_gauge)))
+            
+            sub_t = self.font_tiny.render("RECORDING LIVE LANDMARKS...", True, (120, 150, 180))
+            self.screen.blit(sub_t, sub_t.get_rect(center=(cx_gauge, cy_gauge + 95)))
+            
+        elif self.calibration_stage == "COMPLETE":
+            y = 130
+            rx = self.font_head.render("Clinical Mobility Summary", True, COLOR_SUCCESS)
+            self.screen.blit(rx, (50, y))
+            y += 45
+            
+            rom_val = self.calibrated_max_angle - self.calibrated_min_angle
+            
+            if rom_val >= 75:
+                grade = "Excellent 🌟"
+                grade_col = COLOR_SUCCESS
+            elif rom_val >= 55:
+                grade = "Good 👍"
+                grade_col = COLOR_PRIMARY
+            elif rom_val >= 35:
+                grade = "Fair 🧘"
+                grade_col = COLOR_WARNING
+            else:
+                grade = "Limited 🩹"
+                grade_col = (255, 100, 100)
+                
+            metrics = [
+                ("Active Joint ROM:", f"{rom_val:.1f}°", (255, 255, 255)),
+                ("Flexibility Grade:", grade, grade_col),
+                ("Max Extension Reach:", f"{self.calibrated_max_extension:.0f} pixels", (200, 220, 240)),
+                ("Calibrated Fist Value:", f"{self.calibrated_fist_val:.3f}", (200, 220, 240)),
+                ("Dynamic Difficulty Scaling:", f"{int(min(1.0, self.calibrated_max_extension/170.0)*100)}% ACTIVE", COLOR_SUCCESS)
+            ]
+            
+            for label, value, val_col in metrics:
+                lx = self.font_hud.render(label, True, (160, 180, 200))
+                self.screen.blit(lx, (50, y))
+                vx = self.font_hud.render(value, True, val_col)
+                self.screen.blit(vx, (310, y))
+                y += 34
+                
+            y += 20
+            rec_box = pygame.Rect(40, y, panel_rect.width - 80, 80)
+            pygame.draw.rect(self.screen, (20, 35, 65), rec_box, border_radius=8)
+            pygame.draw.rect(self.screen, COLOR_SUCCESS, rec_box, 1, border_radius=8)
+            
+            rec_text = "System adapted to limited reach. Perfect for recovery!" if rom_val < 55 else "Standard reach active. Excellent joint flexibility!"
+            rt = self.font_hint.render(rec_text, True, (255, 220, 150))
+            self.screen.blit(rt, rt.get_rect(center=rec_box.center))
+            
+            self.cal_finish_button.draw(self.screen, self.font_small, text="FINISH ASSESSMENT", base_col=(25,45,35), hov_col=(40,90,60))
+            
+        self._draw_cursor(hand_data)
 
     def _draw_level_complete(self):
         """Full-screen 2.5-second celebration screen between gameplay and report"""
@@ -4241,12 +4845,11 @@ class PhysioSystem:
             self.menu_button.draw(self.screen, self.font_small, text="PLAY AGAIN", base_col=(25,40,25), hov_col=(40,80,40))
             if hasattr(self, 'next_button') and getattr(self, 'current_level', 1) < 6:
                 self.next_button.draw(self.screen, self.font_small, text="NEXT GAME", base_col=(25,25,50), hov_col=(40,40,80))
-            self.home_button.draw(self.screen, self.font_small, text="MAIN MENU", base_col=(40,40,25), hov_col=(80,80,40))
+            self.home_button.draw(self.screen, self.font_small, text="MAIN MENU", base_col=(60,30,90), hov_col=(100,50,150))
             self.close_button.draw(self.screen, self.font_small)
 
-            # Cursor
-            hand_data = self.hand_engine.get_hand_data()
-            self._draw_cursor(hand_data)
+            # Cursor is drawn by the main drawing loop because GameState.RESULTS now has sidebar enabled
+            pass
 
     def _draw_cloud_sync(self):
         """Draw fake cloud sync animation"""
@@ -4300,7 +4903,7 @@ class PhysioSystem:
 
     def _draw_therapist_dashboard(self):
         self.screen.fill((20, 10, 15)) # Dark red/black to indicate admin mode
-        title = self.font_large.render("⚠️ THERAPIST CONFIGURATION PANEL ⚠️", True, (255, 100, 100))
+        title = self.font_large.render("THERAPIST CONFIGURATION PANEL", True, (255, 100, 100))
         self.screen.blit(title, (50, 100))
         
         self.admin_back_button.draw(self.screen, self.font_medium, base_col=(100, 40, 40), hov_col=(150, 50, 50))
