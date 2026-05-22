@@ -1,0 +1,17 @@
+AI Hand Rehabilitation — Session Report
+=============================================
+Patient  : Quick Guest
+Date     : 21 May 2026  20:54
+Level    : 6
+Pain NRS : 3/10
+
+-- Performance --
+Score    : 80
+Accuracy : 88.9%
+ROM Angle: 164.6°
+Duration : 30s
+
+-- All-Time Best --
+Best Score   : 570
+Best Accuracy: 100.0%
+Best ROM     : 167.8°

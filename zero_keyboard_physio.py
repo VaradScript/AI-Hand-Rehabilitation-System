@@ -807,6 +807,18 @@ class DatabaseManager:
                     pain_level INTEGER DEFAULT 0
                 )
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS patients (
+                    name TEXT PRIMARY KEY,
+                    age INTEGER,
+                    age_group TEXT,
+                    cal_fist_val REAL DEFAULT 0.12,
+                    cal_max_ext REAL DEFAULT 170.0,
+                    cal_min_ang REAL DEFAULT 15.0,
+                    cal_max_ang REAL DEFAULT 90.0,
+                    cal_active INTEGER DEFAULT 0
+                )
+            """)
             # Migrations for older DBs
             for col, defn in [("level",          "INTEGER DEFAULT 1"),
                               ("score",          "INTEGER DEFAULT 0"),
@@ -830,6 +842,76 @@ class DatabaseManager:
             print(f"CRITICAL: Database initialization failed: {e}")
             with open("db_error.txt", "a") as f:
                 f.write(f"{datetime.now()} - Init Error: {e}\n")
+
+    def save_patient(self, name: str, age: int, age_group: str,
+                     cal_fist_val: float = 0.12, cal_max_ext: float = 170.0,
+                     cal_min_ang: float = 15.0, cal_max_ang: float = 90.0,
+                     cal_active: int = 0):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO patients 
+                (name, age, age_group, cal_fist_val, cal_max_ext, cal_min_ang, cal_max_ang, cal_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (name, age, age_group, cal_fist_val, cal_max_ext, cal_min_ang, cal_max_ang, cal_active))
+            conn.commit()
+            conn.close()
+            print(f"[SUCCESS] Saved patient profile: {name} (Age {age}, Group {age_group})")
+        except Exception as e:
+            print(f"Failed to save patient profile: {e}")
+
+    def get_patient(self, name: str):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT age, age_group, cal_fist_val, cal_max_ext, cal_min_ang, cal_max_ang, cal_active
+                FROM patients WHERE name = ?
+            """, (name,))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                return {
+                    'age': row[0],
+                    'age_group': row[1],
+                    'cal_fist_val': row[2],
+                    'cal_max_ext': row[3],
+                    'cal_min_ang': row[4],
+                    'cal_max_ang': row[5],
+                    'cal_active': row[6]
+                }
+            return None
+        except Exception as e:
+            print(f"Failed to get patient: {e}")
+            return None
+
+    def get_all_patients(self):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT name, age, age_group, cal_fist_val, cal_max_ext, cal_min_ang, cal_max_ang, cal_active
+                FROM patients ORDER BY name ASC
+            """)
+            rows = cursor.fetchall()
+            conn.close()
+            res = []
+            for row in rows:
+                res.append({
+                    'name': row[0],
+                    'age': row[1],
+                    'age_group': row[2],
+                    'cal_fist_val': row[3],
+                    'cal_max_ext': row[4],
+                    'cal_min_ang': row[5],
+                    'cal_max_ang': row[6],
+                    'cal_active': row[7]
+                })
+            return res
+        except Exception as e:
+            print(f"Failed to get all patients: {e}")
+            return []
     
     def save_session(self, level: int, score: int, duration: float,
                     avg_accuracy: float, max_extension: float,
@@ -851,7 +933,7 @@ class DatabaseManager:
             conn.commit()
             conn.close()
             
-            print(f"✓ Session saved: Level {level}, Score {score}, Accuracy {avg_accuracy:.1f}%")
+            print(f"[SUCCESS] Session saved: Level {level}, Score {score}, Accuracy {avg_accuracy:.1f}%")
         except Exception as e:
             import logging
             logging.basicConfig(filename='db_error.txt', level=logging.ERROR, 
@@ -917,16 +999,25 @@ class DatabaseManager:
                 'extension': 0
             }
 
-    def get_recent_sessions(self, limit: int = 6):
+    def get_recent_sessions(self, limit: int = 6, patient_id: str = None):
         """Return last N sessions ordered oldest→newest for progress chart"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT level, avg_accuracy, avg_hand_angle, score,
-                       strftime('%d/%m', timestamp) as date
-                FROM sessions ORDER BY id DESC LIMIT ?
-            """, (limit,))
+            if patient_id:
+                cursor.execute("""
+                    SELECT level, avg_accuracy, avg_hand_angle, score,
+                           strftime('%d/%m', timestamp) as date
+                    FROM sessions 
+                    WHERE patient_id = ?
+                    ORDER BY id DESC LIMIT ?
+                """, (patient_id, limit))
+            else:
+                cursor.execute("""
+                    SELECT level, avg_accuracy, avg_hand_angle, score,
+                           strftime('%d/%m', timestamp) as date
+                    FROM sessions ORDER BY id DESC LIMIT ?
+                """, (limit,))
             rows = cursor.fetchall()
             conn.close()
             return list(reversed(rows))
@@ -934,18 +1025,29 @@ class DatabaseManager:
             print(f"Failed to pull recent sessions: {e}")
             return []
 
-    def get_session_history(self, limit: int = 20):
+    def get_session_history(self, limit: int = 20, patient_id: str = None):
         """Full session list for the History screen (newest first)"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id,
-                       strftime('%d %b %Y  %H:%M', timestamp) as dt,
-                       level, score, avg_accuracy, avg_hand_angle,
-                       duration, pain_level
-                FROM sessions ORDER BY id DESC LIMIT ?
-            """, (limit,))
+            if patient_id:
+                cursor.execute("""
+                    SELECT id,
+                           strftime('%d %b %Y  %H:%M', timestamp) as dt,
+                           level, score, avg_accuracy, avg_hand_angle,
+                           duration, pain_level
+                    FROM sessions 
+                    WHERE patient_id = ?
+                    ORDER BY id DESC LIMIT ?
+                """, (patient_id, limit))
+            else:
+                cursor.execute("""
+                    SELECT id,
+                           strftime('%d %b %Y  %H:%M', timestamp) as dt,
+                           level, score, avg_accuracy, avg_hand_angle,
+                           duration, pain_level
+                    FROM sessions ORDER BY id DESC LIMIT ?
+                """, (limit,))
             rows = cursor.fetchall()
             conn.close()
             return rows
@@ -953,15 +1055,23 @@ class DatabaseManager:
             print(f"Failed to pull session history: {e}")
             return []
 
-    def get_rom_trend(self, limit: int = 10):
+    def get_rom_trend(self, limit: int = 10, patient_id: str = None):
         """ROM angle per session newest→oldest, for trend line chart"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT avg_hand_angle, strftime('%d/%m', timestamp)
-                FROM sessions ORDER BY id DESC LIMIT ?
-            """, (limit,))
+            if patient_id:
+                cursor.execute("""
+                    SELECT avg_hand_angle, strftime('%d/%m', timestamp)
+                    FROM sessions 
+                    WHERE patient_id = ?
+                    ORDER BY id DESC LIMIT ?
+                """, (patient_id, limit))
+            else:
+                cursor.execute("""
+                    SELECT avg_hand_angle, strftime('%d/%m', timestamp)
+                    FROM sessions ORDER BY id DESC LIMIT ?
+                """, (limit,))
             rows = cursor.fetchall()
             conn.close()
             return list(reversed(rows))
@@ -969,10 +1079,10 @@ class DatabaseManager:
             print(f"Failed to pull ROM trend: {e}")
             return []
 
-    def predict_recovery_progress(self) -> float:
+    def predict_recovery_progress(self, patient_id: str = None) -> float:
         """Predict recovery percentage over next 7 days based on recent data."""
         try:
-            sessions = self.get_session_history(20)
+            sessions = self.get_session_history(20, patient_id=patient_id)
             if len(sessions) < 3: return -1.0
             
             # Use max_finger_extension or avg_hand_angle for trend
@@ -1005,51 +1115,67 @@ class DatabaseManager:
         except Exception as e:
             print(f"Purge error: {e}")
 
-    def render_matplotlib_dashboard(self) -> pygame.Surface:
+    def render_matplotlib_dashboard(self, patient_id: str = None) -> pygame.Surface:
         try:
-            rom_data = self.get_rom_trend(15) 
-            sessions = self.get_session_history(15)
+            rom_data = self.get_rom_trend(15, patient_id=patient_id) 
+            sessions = self.get_session_history(15, patient_id=patient_id)
             
             if not rom_data or not sessions:
                 surf = pygame.Surface((800, 400))
-                surf.fill((12, 20, 40))
+                surf.fill((8, 12, 22))
+                # Render placeholders
+                font = pygame.font.SysFont("segoeui", 22)
+                lbl = font.render("AWAITING PATIENT DATA FOR CLINICAL DASHBOARD", True, (0, 180, 255))
+                surf.blit(lbl, lbl.get_rect(center=(400, 200)))
                 return surf
                 
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4), dpi=100)
-            fig.patch.set_facecolor('#0c1428')
+            fig.patch.set_facecolor('#080c16')
             
             rom_chrono = list(reversed(rom_data))
             angles = [r[0] or 0 for r in rom_chrono]
             dates = [r[1] or "" for r in rom_chrono] 
             
-            ax1.plot(dates, angles, marker='o', color='#00c8f5')
-            ax1.set_facecolor('#151b2e')
-            ax1.set_title("Flexion Angle vs. Date", color='white')
-            ax1.tick_params(colors='white', labelsize=8)
+            # Glowing cyan lines and beautiful styling for flexion trend
+            ax1.plot(dates, angles, marker='o', markersize=6, color='#00ffcc', linewidth=3, 
+                     markerfacecolor='#00ffcc', markeredgecolor='#080c16')
+            ax1.set_facecolor('#0e1524')
+            ax1.set_title("Flexion ROM Trend (deg)", color='#00ffcc', fontsize=10, fontweight='bold', pad=10)
+            ax1.tick_params(colors='#8fa0c0', labelsize=8)
             ax1.tick_params(axis='x', rotation=45)
-            ax1.grid(color='#212d4d', linestyle='--')
+            ax1.grid(color='#1b3052', linestyle=':', linewidth=1)
+            ax1.spines['bottom'].set_color('#1b3052')
+            ax1.spines['top'].set_color('#1b3052')
+            ax1.spines['left'].set_color('#1b3052')
+            ax1.spines['right'].set_color('#1b3052')
             
             sess_chrono = list(reversed(sessions))
-            durations = [s[6] or 0 for s in sess_chrono]
+            durations = [s[6] or 0 for s in sess_chrono] # Duration in seconds
             sdates = [(s[1] or "")[:6] for s in sess_chrono]
             
-            ax2.bar(sdates, durations, color='#50dc78')
-            ax2.set_facecolor('#151b2e')
-            ax2.set_title("Session Consistency", color='white')
-            ax2.tick_params(colors='white', labelsize=8)
+            # Beautiful neon cyan/blue bar chart
+            ax2.bar(sdates, durations, color='#0088ff', edgecolor='#00ffcc', linewidth=1.5, alpha=0.85)
+            ax2.set_facecolor('#0e1524')
+            ax2.set_title("Rehab Session Consistency", color='#00ffcc', fontsize=10, fontweight='bold', pad=10)
+            ax2.tick_params(colors='#8fa0c0', labelsize=8)
             ax2.tick_params(axis='x', rotation=45)
+            ax2.grid(color='#1b3052', linestyle=':', linewidth=1)
+            ax2.spines['bottom'].set_color('#1b3052')
+            ax2.spines['top'].set_color('#1b3052')
+            ax2.spines['left'].set_color('#1b3052')
+            ax2.spines['right'].set_color('#1b3052')
             
             fig.autofmt_xdate(rotation=45)
             fig.tight_layout()
             buf = io.BytesIO()
-            fig.savefig(buf, format='png', facecolor='#0c1428')
+            fig.savefig(buf, format='png', facecolor='#080c16')
             buf.seek(0)
             plt.close(fig)
             return pygame.image.load(buf, 'png')
         except Exception as e:
             print(f"Matplotlib dashboard error: {e}")
             surf = pygame.Surface((800, 400))
-            surf.fill((80, 20, 20))
+            surf.fill((8, 12, 22))
             return surf
 
 # ============================================================================
@@ -1185,13 +1311,13 @@ class LevelButton:
         m_pos = pygame.mouse.get_pos()
         m_clicked = pygame.mouse.get_pressed()[0]
         
+        # Physical mouse support: triggers immediately on click! Mouse hover does NOT trigger the hover selection ring.
+        if self.rect.collidepoint(m_pos) and m_clicked:
+            self.ring.hover_start = None
+            return True
+            
+        # Hands-free hand tracking support: hover to select.
         is_hovered = False
-        if self.rect.collidepoint(m_pos):
-            is_hovered = True
-            if m_clicked:
-                self.ring.hover_start = None
-                return True
-                
         if cursor_pos is not None and self.rect.collidepoint(cursor_pos):
             is_hovered = True
             
@@ -1387,7 +1513,7 @@ class MedicalSidebar:
     # ------------------------------------------------------------------
     def draw(self, screen, camera_frame, hand_data: HandData,
              level_goals: str, accuracy_hits: int = 0,
-             accuracy_attempts: int = 0):
+             accuracy_attempts: int = 0, is_results: bool = False):
         """Draw sidebar with camera and clinical stats"""
 
         # ── Background ──────────────────────────────────────────────
@@ -1467,6 +1593,9 @@ class MedicalSidebar:
         screen.blit(st, st.get_rect(center=status_rect.center))
         y_offset += 40
 
+        if is_results:
+            return
+
         # ── ROM / Joint Angles ───────────────────────────────────────
         y_offset = self._section_header(screen, "RANGE OF MOTION", y_offset,
                                          (0, 140, 180))
@@ -1503,9 +1632,9 @@ class MedicalSidebar:
             screen.blit(pt, pt.get_rect(center=pill.center))
             return y + 26
 
-        y_offset = _pill("PINCH" + (" ✓" if hand_data.is_pinching else ""),
+        y_offset = _pill("PINCH" + (" ACTIVE" if hand_data.is_pinching else ""),
                           hand_data.is_pinching, y_offset)
-        y_offset = _pill("FIST"  + (" ✓" if hand_data.is_fist    else ""),
+        y_offset = _pill("FIST"  + (" ACTIVE" if hand_data.is_fist    else ""),
                           hand_data.is_fist,    y_offset)
         y_offset += 15
 
@@ -2070,6 +2199,8 @@ class PhysioSystem:
         
         # State
         self.state = GameState.PATIENT_REGISTRATION
+        self._last_state = None  # Track state changes for safe mouse warp and safety grace periods
+        self._transition_time = 0.0  # Safe grace period timestamp on screen transitions
         self.age_group = None  # Will be set on age selection
         
         # Patient Information
@@ -2209,6 +2340,32 @@ class PhysioSystem:
         self.purge_button = Button(WINDOW_WIDTH - 220, WINDOW_HEIGHT - 60, 200, 45, "PURGE RECORDS", (200, 50, 50))
         self.history_back_button = Button(20, WINDOW_HEIGHT - 60, 150, 45, "← BACK", (40, 60, 100))
         
+        # Load and cache top 3 patient profiles for hands-free directory selection
+        self._refresh_patient_profiles()
+
+    def _refresh_patient_profiles(self):
+        """Query existing patients and construct zero-keyboard buttons for the top 3"""
+        try:
+            patients = self.db.get_all_patients()
+            # Select top 3 patients
+            top_patients = patients[:3]
+            
+            self.patient_profile_buttons = {}
+            left_x = 50
+            cam_x = WINDOW_WIDTH - 480 - 40 # 760
+            input_w = cam_x - left_x - 40   # 670
+            btn_y = 615
+            btn_w = (input_w - 20) // 3     # 216
+            btn_h = 60
+            
+            for i, p in enumerate(top_patients):
+                px = left_x + i * (btn_w + 10)
+                btn = CloseButton(px, btn_y, btn_w, btn_h)
+                btn.duration = 1.5
+                self.patient_profile_buttons[p['name']] = btn
+        except Exception as e:
+            print(f"Error refreshing patient profiles: {e}")
+        
     def run(self):
         """Main application loop with initial splash screen"""
         try:
@@ -2273,6 +2430,9 @@ class PhysioSystem:
                 
                 self._draw_initial_splash(progress, status_msgs, engine_error)
                 self.clock.tick(60)
+
+            # Warp the mouse pointer to a safe, empty area (top right) immediately after loading screen
+            pygame.mouse.set_pos((WINDOW_WIDTH - 50, 50))
 
             # 2. MAIN APPLICATION LOOP
             while self.running:
@@ -2412,7 +2572,25 @@ class PhysioSystem:
                     except: pass
     
     def _update(self):
+        # Check if state has transitioned to safely warp the mouse cursor and reset button hover clocks
+        if self.state != self._last_state:
+            # Warp the mouse pointer to a safe, empty area (top right inside the medical sidebar)
+            pygame.mouse.set_pos((WINDOW_WIDTH - 50, 50))
+            
+            # Reset all button hover timers so the next screen starts completely fresh
+            self._reset_all_button_hovers()
+            
+            # Update last state tracker and record transition time for safety grace period
+            self._last_state = self.state
+            self._transition_time = time.time()
+
         hand_data = self.hand_engine.get_hand_data()
+        
+        # Enforce 2.0-second safety grace period after transition to prevent accidental selections
+        if time.time() - getattr(self, '_transition_time', 0.0) < 2.0:
+            from copy import copy
+            hand_data = copy(hand_data)
+            hand_data.index_tip = None
         
         # Track max extension and angles
         if hand_data.finger_extension > 0:
@@ -2446,12 +2624,24 @@ class PhysioSystem:
                                GameState.LEVEL_COMPLETE, GameState.PAIN_SCALE,
                                GameState.HISTORY, GameState.PATIENT_REGISTRATION,
                                GameState.AGE_SELECT, GameState.CLOUD_SYNC, GameState.CALIBRATION, GameState.THERAPIST_DASHBOARD]:
-            # Trigger 1: Hover-to-Select on HomeIcon
-            home_hover_exit = self.home_icon.update(hand_data.is_fist, hand_data.index_tip)
             
-            # Trigger 2: Global Fist hold countdown anywhere on the screen
+            # Check if we are in an active gameplay level where making a fist is part of the therapy
+            gameplay_states = [
+                GameState.LEVEL1_FLEXIBILITY,
+                GameState.LEVEL2_STRENGTH,
+                GameState.LEVEL3_FINEMOTOR,
+                GameState.LEVEL4_COORDINATION,
+                GameState.LEVEL5_GRIP_RELEASE,
+                GameState.LEVEL6_FINGER_TAPS
+            ]
+            is_gameplay = self.state in gameplay_states
+            
+            # Trigger 1: Hover-to-Select on HomeIcon (disable global fist trigger during active gameplay)
+            home_hover_exit = self.home_icon.update(False if is_gameplay else hand_data.is_fist, hand_data.index_tip)
+            
+            # Trigger 2: Global Fist hold countdown anywhere on the screen (disabled during active gameplay)
             global_fist_exit = False
-            if hand_data.is_fist:
+            if not is_gameplay and hand_data.is_fist:
                 if not hasattr(self, '_global_fist_start') or self._global_fist_start is None:
                     self._global_fist_start = time.time()
                 elapsed = time.time() - self._global_fist_start
@@ -2583,6 +2773,40 @@ class PhysioSystem:
                     self.patient_age = "30"
                 self._submit_registration()
                 self.quick_start_button.hover_start = None
+                return
+
+        # Update existing profile selection buttons if they exist
+        if hasattr(self, 'patient_profile_buttons') and self.patient_profile_buttons:
+            for p_name, btn in list(self.patient_profile_buttons.items()):
+                if btn.update(hand_data.index_tip):
+                    # Load this patient profile!
+                    p_data = self.db.get_patient(p_name)
+                    if p_data:
+                        self.patient_name = p_name
+                        self.patient_age = str(p_data['age'])
+                        self.age_group = AgeGroup(p_data['age_group'])
+                        
+                        # Load calibration thresholds if they exist and are active
+                        if p_data.get('cal_active', 0):
+                            self.calibrated_fist_val = p_data.get('cal_fist_val', 0.12)
+                            self.calibrated_max_extension = p_data.get('cal_max_ext', 170.0)
+                            self.calibrated_min_angle = p_data.get('cal_min_ang', 15.0)
+                            self.calibrated_max_angle = p_data.get('cal_max_ang', 90.0)
+                            
+                            # Update HandEngine
+                            self.hand_engine.fist_threshold = self.calibrated_fist_val
+                            self.hand_engine.calibrated_max_extension = self.calibrated_max_extension
+                            self.hand_engine.calibration_active = True
+                            self.calibration_active = True
+                            print(f"[SUCCESS] Dynamic Calibration Loaded from DB: Fist={self.calibrated_fist_val}, MaxExt={self.calibrated_max_extension}")
+                        else:
+                            self.calibration_active = False
+                        
+                        VOICE.speak(f"Welcome back {self.patient_name}. Patient profile loaded successfully.")
+                        btn.hover_start = None
+                        self.state = GameState.MAIN_MENU
+                        self.sounds.play('select')
+                        break
 
     def _submit_registration(self):
         """Process patient registration and auto-assign age group"""
@@ -2599,12 +2823,71 @@ class PhysioSystem:
             else:
                 self.age_group = AgeGroup.SENIOR
             
+            # Query if patient already exists in DB to prevent overwriting settings
+            existing_p = self.db.get_patient(self.patient_name)
+            if existing_p:
+                # Load profile settings
+                self.patient_age = str(existing_p['age'])
+                self.age_group = AgeGroup(existing_p['age_group'])
+                if existing_p.get('cal_active', 0):
+                    self.calibrated_fist_val = existing_p.get('cal_fist_val', 0.12)
+                    self.calibrated_max_extension = existing_p.get('cal_max_ext', 170.0)
+                    self.calibrated_min_angle = existing_p.get('cal_min_ang', 15.0)
+                    self.calibrated_max_angle = existing_p.get('cal_max_ang', 90.0)
+                    
+                    self.hand_engine.fist_threshold = self.calibrated_fist_val
+                    self.hand_engine.calibrated_max_extension = self.calibrated_max_extension
+                    self.hand_engine.calibration_active = True
+                    self.calibration_active = True
+                    print(f"[SUCCESS] Existing Patient Calibration Loaded: Fist={self.calibrated_fist_val}, MaxExt={self.calibrated_max_extension}")
+            else:
+                # Save new profile to DB
+                self.db.save_patient(self.patient_name, age, self.age_group.value)
+                # Refresh local top-3 profile buttons
+                self._refresh_patient_profiles()
+
             print(f"Patient: {self.patient_name}, Age: {age}, Group: {self.age_group.value}")
             self.state = GameState.MAIN_MENU
             self.sounds.play('select')
         except ValueError:
             print("Invalid age entered")
     
+    def _reset_all_button_hovers(self):
+        """Reset all button hover progress timers on the screen to prevent accidental activations"""
+        button_containers = [
+            getattr(self, 'level_buttons', []),
+            getattr(self, 'age_buttons', []),
+            getattr(self, 'patient_profile_buttons', {}).values() if hasattr(self, 'patient_profile_buttons') else [],
+        ]
+        
+        single_buttons = [
+            getattr(self, 'quick_start_button', None),
+            getattr(self, 'exit_button', None),
+            getattr(self, 'calibrate_button', None),
+            getattr(self, 'history_button', None),
+            getattr(self, 'home_icon', None),
+            getattr(self, 'close_button', None),
+            getattr(self, 'menu_button', None),
+            getattr(self, 'home_button', None),
+            getattr(self, 'next_button', None),
+            getattr(self, 'cal_start_button', None),
+            getattr(self, 'cal_finish_button', None),
+            getattr(self, 'history_back_button', None),
+            getattr(self, 'purge_button', None),
+            getattr(self, 'admin_back_button', None),
+            getattr(self, 'admin_purge_button', None)
+        ]
+        
+        for container in button_containers:
+            for btn in container:
+                if btn and hasattr(btn, 'ring') and btn.ring:
+                    btn.ring.hover_start = None
+                    
+        for btn in single_buttons:
+            if btn:
+                if hasattr(btn, 'ring') and btn.ring:
+                    btn.ring.hover_start = None
+
     def _update_menu(self, hand_data: HandData):
         if hasattr(self, 'exit_button') and self.exit_button.update(hand_data.index_tip):
             self.running = False
@@ -2621,7 +2904,7 @@ class PhysioSystem:
         if self.history_button.update(hand_data.index_tip):
             self.state = GameState.HISTORY
             # Cache the Matplotlib dashboard image when entering History
-            self.dashboard_surf = self.db.render_matplotlib_dashboard()
+            self.dashboard_surf = self.db.render_matplotlib_dashboard(self.patient_name)
             self.sounds.play('select')
             return
             
@@ -2675,7 +2958,7 @@ class PhysioSystem:
                             self.reach_distance = max(self.reach_distance, reach)
 
         # Check if all bubbles popped (only when list is non-empty)
-        if self.bubbles and all(b.popped for b in self.bubbles):
+        if (self.bubbles and all(b.popped for b in self.bubbles)) or (time.time() - getattr(self, 'level_wall_start', 0.0) > LEVEL_DURATION * 1.5):
             self._end_level()
     
     def _update_level2(self, hand_data: HandData):
@@ -2753,7 +3036,7 @@ class PhysioSystem:
             self._spawn_falling_item()
         
         # End after 30 seconds
-        if time.time() - self.session_start > 30:
+        if (time.time() - self.session_start > 30) or (time.time() - getattr(self, 'level_wall_start', 0.0) > LEVEL_DURATION * 1.5):
             self._end_level()
     
     def _update_level3(self, hand_data: HandData):
@@ -2801,7 +3084,7 @@ class PhysioSystem:
             self._spawn_seed()
         
         # End after 30 seconds
-        if time.time() - self.session_start > 30:
+        if (time.time() - self.session_start > 30) or (time.time() - getattr(self, 'level_wall_start', 0.0) > LEVEL_DURATION * 1.5):
             self._end_level()
 
     def _update_level4(self, hand_data: HandData):
@@ -2809,13 +3092,13 @@ class PhysioSystem:
         # Time-based movement for the target (Figure 8 pattern)
         theme = self._get_theme()
         speed_mult = theme.get("speed_multiplier", 1.0)
-        self.trace_t += 0.02 * speed_mult
+        self.trace_t += 0.008 * speed_mult
         
         # Figure 8 (Lissajous curve) parameters
         cx = GAME_AREA_WIDTH // 2
         cy = WINDOW_HEIGHT // 2
-        a = 300 # width scale
-        b = 150 # height scale
+        a = 180 # width scale (was 300)
+        b = 90 # height scale (was 150)
         
         # Calculate target position
         self.trace_target_x = cx + a * math.sin(self.trace_t)
@@ -2833,11 +3116,11 @@ class PhysioSystem:
             # Record every few frames for accuracy
             if int(self.trace_t * 100) % 5 == 0:
                 self.accuracy_attempts += 1
-                if dist < 60: # Good trace radius
+                if dist < 85: # Good trace radius (was 60)
                     self.accuracy_hits += 1
                     self.score += int(5 * self.score_multiplier)
                     
-                    if dist < 30: # Perfect trace
+                    if dist < 45: # Perfect trace (was 30)
                         self.combo += 1
                         self.particles.emit(int(self.trace_target_x), int(self.trace_target_y), COLOR_SUCCESS, 2)
                 else:
@@ -2849,8 +3132,8 @@ class PhysioSystem:
                 self.sounds.play('catch')
                 self.popups.append(ScorePopup(self.trace_target_x, self.trace_target_y - 40, "SMOOTH!"))
                 
-        # End after 30 seconds
-        if time.time() - self.session_start > 30:
+        # End after 30 seconds or wall-clock safety ceiling
+        if (time.time() - self.session_start > 30) or (time.time() - getattr(self, 'level_wall_start', 0.0) > LEVEL_DURATION * 1.5):
             self._end_level()
 
     def _update_level5(self, hand_data: HandData):
@@ -2879,7 +3162,7 @@ class PhysioSystem:
                 self._trigger_feedback()
                 
         # End after 30 seconds
-        if time.time() - self.session_start > 30:
+        if (time.time() - self.session_start > 30) or (time.time() - getattr(self, 'level_wall_start', 0.0) > LEVEL_DURATION * 1.5):
             self.accuracy_attempts = max(self.accuracy_attempts, 5) # Provide base attempts
             self._end_level()
 
@@ -2967,7 +3250,7 @@ class PhysioSystem:
                 self._last_hover = None
                 self.simon_active_pad = None
 
-        if time.time() - self.session_start > 30:
+        if (time.time() - self.session_start > 30) or (time.time() - getattr(self, 'level_wall_start', 0.0) > LEVEL_DURATION * 1.5):
             self.accuracy_attempts = max(self.accuracy_attempts, 5)
             self._end_level()
 
@@ -3037,7 +3320,12 @@ class PhysioSystem:
             camera_frame = self.hand_engine.get_frame()
             goals = self._get_level_goals()
             self.sidebar.draw(self.screen, camera_frame, hand_data, goals,
-                              self.accuracy_hits, self.accuracy_attempts)
+                              self.accuracy_hits, self.accuracy_attempts,
+                              is_results=(self.state == GameState.RESULTS))
+
+            # Draw progress chart over the bottom half of the sidebar on Results screen
+            if self.state == GameState.RESULTS:
+                self._draw_progress_chart()
 
             # Draw cursor
             self._draw_cursor(hand_data)
@@ -3375,6 +3663,16 @@ class PhysioSystem:
                     base_col=(30, 40, 55), hov_col=(0, 120, 180), border_col=(0, 180, 220)
                 )
 
+        # ── Previous Patient Profiles Directory ───────────────────────
+        if hasattr(self, 'patient_profile_buttons') and self.patient_profile_buttons:
+            lbl_surf = self.font_hint.render("SELECT PREVIOUS CLINICAL PROFILE:", True, (0, 255, 180))
+            scr.blit(lbl_surf, (left_x, 590))
+            for name, btn in self.patient_profile_buttons.items():
+                btn.draw(
+                    scr, self.font_hint, name,
+                    base_col=(10, 22, 36), hov_col=(0, 120, 180), border_col=(0, 200, 150)
+                )
+
         # Cursor
         hand_data = self.hand_engine.get_hand_data()
         self._draw_cursor(hand_data)
@@ -3629,8 +3927,8 @@ class PhysioSystem:
         points = []
         for i in range(101):
             t = i * (math.pi * 2 / 100)
-            px = cx + 300 * math.sin(t)
-            py = cy + 150 * math.sin(2 * t)
+            px = cx + 180 * math.sin(t)
+            py = cy + 90 * math.sin(2 * t)
             points.append((px, py))
             
         if len(points) > 1:
@@ -3937,13 +4235,15 @@ class PhysioSystem:
                 self.accuracy_hits, self.accuracy_attempts, list(self.angle_history)
             )
 
-            # Auto-save text report
+            # Auto-save text, HTML, and PDF reports
             try:
                 import os
                 os.makedirs("reports", exist_ok=True)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                fname = f"reports/report_L{self.current_level}_{ts}.txt"
                 sd = self.session_data or {}
+                
+                # 1. Text Report Card
+                fname = f"reports/report_L{self.current_level}_{ts}.txt"
                 with open(fname, "w", encoding="utf-8") as f:
                     f.write(f"AI Hand Rehabilitation — Session Report\n")
                     f.write(f"{'='*45}\n")
@@ -3961,11 +4261,336 @@ class PhysioSystem:
                     f.write(f"Best Score   : {bd.get('score', 0)}\n")
                     f.write(f"Best Accuracy: {bd.get('accuracy', 0):.1f}%\n")
                     f.write(f"Best ROM     : {bd.get('angle', 0):.1f}°\n")
-                print(f"Report saved: {fname}")
+                print(f"Text Report saved: {fname}")
+
+                # 2. Premium Clinical HTML Report Card
+                html_fname = f"reports/session_report_L{self.current_level}_{ts}.html"
                 
-                # --- PDF GENERATION ---
+                LEVEL_NAMES = [
+                    "Flexibility - Pop the Bubbles",
+                    "Flexibility - Pop the Bubbles", 
+                    "Strength & Speed - Catch the Apples", 
+                    "Fine Motor - Plant the Seeds", 
+                    "Coordination - Trace the Path", 
+                    "Grip & Release - Balloon Pump", 
+                    "Cognitive Precision - Simon Pattern Tap"
+                ]
+                level_name_str = LEVEL_NAMES[self.current_level] if self.current_level < len(LEVEL_NAMES) else "Therapeutic Training"
+                
+                acc_val = sd.get('avg_accuracy', 0)
+                rom_val = sd.get('avg_hand_angle', 0)
+                dur_val = sd.get('duration', 0)
+                
+                suggestions_list = []
+                if acc_val >= 85:
+                    suggestions_list.append("Patient demonstrated exceptional target accuracy. Recommend advancing to the next difficulty tier or level.")
+                elif acc_val >= 60:
+                    suggestions_list.append("Good neuromuscular accuracy. Continue with the current protocol to build muscle memory and control.")
+                else:
+                    suggestions_list.append("Target accuracy is low. Encourage slower, more deliberate hand movements. Consider a pediatric or senior mode to expand target radii.")
+
+                if rom_val >= 45:
+                    suggestions_list.append("Average finger flexion is excellent, showing deep range of motion. Joint flexibility is healthy.")
+                else:
+                    suggestions_list.append("Reduced range of motion (ROM) detected. Incorporate warm-up finger stretching exercises before sessions.")
+
+                if self.pain_level >= 5:
+                    suggestions_list.append("WARNING: High patient pain level reported. Shorten session duration, encourage regular pauses, and consult with the attending therapist.")
+                else:
+                    suggestions_list.append("Patient reported minimal pain during this session. Good tolerability of the motor exercises.")
+                
+                suggestions_html = "\n".join([f"<li>{s}</li>" for s in suggestions_list])
+                
+                html_template = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Therapy Session Report - L{self.current_level}</title>
+    <style>
+        :root {{
+            --bg-color: #080c16;
+            --card-bg: rgba(13, 22, 42, 0.7);
+            --border-color: rgba(0, 255, 204, 0.2);
+            --accent-glow: #00ffcc;
+            --accent-blue: #0088ff;
+            --text-primary: #ffffff;
+            --text-secondary: #8fa0c0;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+        }}
+        body {{
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 40px 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }}
+        .report-card {{
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 40px;
+            width: 100%;
+            max-width: 800px;
+            box-shadow: 0 8px 32px 0 rgba(0, 255, 204, 0.08);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            position: relative;
+            overflow: hidden;
+        }}
+        .report-card::before {{
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 4px;
+            background: linear-gradient(90deg, var(--accent-blue), var(--accent-glow));
+        }}
+        .header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid rgba(143, 160, 192, 0.15);
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+        }}
+        .header h1 {{
+            margin: 0;
+            font-size: 26px;
+            font-weight: 700;
+            letter-spacing: 1px;
+            background: linear-gradient(90deg, #ffffff, var(--accent-glow));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }}
+        .header-meta {{
+            text-align: right;
+            color: var(--text-secondary);
+            font-size: 14px;
+        }}
+        .patient-info {{
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+            background: rgba(255, 255, 255, 0.02);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }}
+        .info-item {{
+            display: flex;
+            flex-direction: column;
+        }}
+        .info-label {{
+            font-size: 12px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }}
+        .info-value {{
+            font-size: 18px;
+            font-weight: 600;
+        }}
+        .metrics-grid {{
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 25px;
+            margin-bottom: 35px;
+        }}
+        .metric-card {{
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 25px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }}
+        .metric-details h3 {{
+            margin: 0 0 5px 0;
+            font-size: 14px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+        }}
+        .metric-details .value {{
+            font-size: 28px;
+            font-weight: 700;
+            color: var(--accent-glow);
+        }}
+        .radial-indicator {{
+            position: relative;
+            width: 70px;
+            height: 70px;
+            border-radius: 50%;
+            background: conic-gradient(var(--accent-glow) {acc_val}%, rgba(255, 255, 255, 0.08) 0);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+        .radial-indicator::after {{
+            content: '{acc_val:.1f}%';
+            position: absolute;
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            background: #0d162a;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            font-weight: 600;
+        }}
+        .clinical-suggestions {{
+            background: rgba(0, 255, 204, 0.04);
+            border: 1px dashed var(--border-color);
+            border-radius: 12px;
+            padding: 25px;
+            margin-bottom: 30px;
+        }}
+        .clinical-suggestions h2 {{
+            margin-top: 0;
+            font-size: 18px;
+            color: var(--accent-glow);
+            letter-spacing: 0.5px;
+        }}
+        .clinical-suggestions ul {{
+            margin: 0;
+            padding-left: 20px;
+            color: var(--text-secondary);
+            line-height: 1.6;
+        }}
+        .clinical-suggestions li {{
+            margin-bottom: 8px;
+        }}
+        .footer {{
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 12px;
+            border-top: 1px solid rgba(143, 160, 192, 0.15);
+            padding-top: 20px;
+        }}
+        @media print {{
+            body {{
+                background: #fff;
+                color: #000;
+                padding: 0;
+            }}
+            .report-card {{
+                border: none;
+                box-shadow: none;
+                background: none;
+                padding: 0;
+                backdrop-filter: none;
+            }}
+            .report-card::before {{
+                display: none;
+            }}
+            .metric-card, .patient-info {{
+                border: 1px solid #ddd;
+                background: #fff;
+                color: #000;
+            }}
+            .metric-details .value {{
+                color: #000;
+            }}
+            .radial-indicator::after {{
+                background: #fff;
+                color: #000;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="report-card">
+        <div class="header">
+            <div>
+                <h1>CLINICAL THERAPY REPORT</h1>
+                <span style="color: var(--accent-glow); font-size: 12px; letter-spacing: 2px;">NEURAL BIO-FEEDBACK SUITE</span>
+            </div>
+            <div class="header-meta">
+                <div>SESSION TIMESTAMP</div>
+                <div>{datetime.now().strftime('%d %B %Y %H:%M')}</div>
+            </div>
+        </div>
+
+        <div class="patient-info">
+            <div class="info-item">
+                <span class="info-label">Patient Name</span>
+                <span class="info-value">{self.patient_name or 'Unknown'}</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Demographic</span>
+                <span class="info-value">{self.age_group.value if self.age_group else 'Adult'} (Age {self.patient_age or '30'})</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Therapy Protocol</span>
+                <span class="info-value">Level {self.current_level} - {level_name_str}</span>
+            </div>
+        </div>
+
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <div class="metric-details">
+                    <h3>Performance Score</h3>
+                    <div class="value">{sd.get('score', self.score)}</div>
+                </div>
+                <div style="font-size: 24px;">🏆</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-details">
+                    <h3>Target Accuracy</h3>
+                    <div class="value">{acc_val:.1f}%</div>
+                </div>
+                <div class="radial-indicator"></div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-details">
+                    <h3>Range of Motion (ROM)</h3>
+                    <div class="value">{rom_val:.1f}°</div>
+                </div>
+                <div style="font-size: 24px; color: var(--accent-glow);">📐</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-details">
+                    <h3>Pre-Session Pain / Time</h3>
+                    <div class="value">{self.pain_level}/10 <span style="font-size: 16px; font-weight: normal; color: var(--text-secondary);">({dur_val:.0f}s)</span></div>
+                </div>
+                <div style="font-size: 24px;">⚡</div>
+            </div>
+        </div>
+
+        <div class="clinical-suggestions">
+            <h2>CLINICAL OBSERVATIONS & SUGGESTIONS</h2>
+            <ul>
+                {suggestions_html}
+            </ul>
+        </div>
+
+        <div class="footer">
+            Generated by Zero-Keyboard AI Hand Rehabilitation System | Confidential Medical Record
+        </div>
+    </div>
+</body>
+</html>"""
+                with open(html_fname, "w", encoding="utf-8") as f:
+                    f.write(html_template)
+                print(f"HTML Report saved: {html_fname}")
+                VOICE.speak("Clinical report exported to reports folder.")
+                
+                # 3. PDF Generation (with fixed imports and variables)
                 try:
-                    pdf_fname = os.path.join(rep_dir, f"report_L{self.current_level}_{timestamp}.pdf")
+                    from reportlab.pdfgen import canvas
+                    from reportlab.lib.pagesizes import letter
+                    pdf_fname = f"reports/report_L{self.current_level}_{ts}.pdf"
                     c = canvas.Canvas(pdf_fname, pagesize=letter)
                     c.setFont("Helvetica-Bold", 24)
                     c.setFillColorRGB(0, 0.4, 0.6)
@@ -3985,18 +4610,10 @@ class PhysioSystem:
                     c.setFont("Helvetica", 12)
                     c.setFillColorRGB(0, 0, 0)
                     c.drawString(50, 580, f"Final Score: {sd.get('score', self.score)}")
-                    c.drawString(50, 560, f"Target Accuracy: {sd.get('avg_accuracy', 0):.1f}%")
-                    c.drawString(50, 540, f"Average Range of Motion: {sd.get('avg_hand_angle', 0):.1f} degrees")
-                    c.drawString(50, 520, f"Therapy Duration: {sd.get('duration', 0):.0f} seconds")
+                    c.drawString(50, 560, f"Target Accuracy: {acc_val:.1f}%")
+                    c.drawString(50, 540, f"Average Range of Motion: {rom_val:.1f} degrees")
+                    c.drawString(50, 520, f"Therapy Duration: {dur_val:.0f} seconds")
                     
-                    # Embed dashboard graph if available
-                    graph_path = os.path.join(rep_dir, "dashboard.png")
-                    if os.path.exists(graph_path):
-                        c.setFont("Helvetica-Bold", 16)
-                        c.setFillColorRGB(0, 0.3, 0.5)
-                        c.drawString(50, 480, "Progress Analytics")
-                        c.drawImage(graph_path, 50, 180, width=500, height=280)
-                        
                     c.save()
                     print(f"PDF Report saved: {pdf_fname}")
                 except Exception as pdf_e:
@@ -4145,6 +4762,7 @@ class PhysioSystem:
         lv = self.pending_level or 1
         self.current_level = lv
         self.session_start = time.time()
+        self.level_wall_start = time.time()
         self.score = 0
         self.max_extension = 0
         self.reach_distance = 0
@@ -4153,23 +4771,29 @@ class PhysioSystem:
         if lv == 1:
             self.state = GameState.LEVEL1_FLEXIBILITY
             self._spawn_bubbles()
+            VOICE.speak("Level 1: Bubble Pop. Extend your index finger and touch the moving bubbles to pop them and improve flexibility.")
         elif lv == 2:
             self.state = GameState.LEVEL2_STRENGTH
+            VOICE.speak("Level 2: Fruit Catch. Move your hand left and right to catch the falling apples in the basket.")
         elif lv == 3:
             self.state = GameState.LEVEL3_FINEMOTOR
+            VOICE.speak("Level 3: Fine Motor. Close your index and thumb to pinch and pick up seeds, then drop them in the pot.")
         elif lv == 4:
             self.state = GameState.LEVEL4_COORDINATION
             self.trace_t = 0.0
             self.trace_path = []
+            VOICE.speak("Level 4: Trace the Path. Move your index finger along the dotted line to trace the medical pattern.")
         elif lv == 5:
             self.state = GameState.LEVEL5_GRIP_RELEASE
             self.pump_state = 0
             self.pump_reps = 0
             self.balloon_scale = 1.0
+            VOICE.speak("Level 5: Balloon Pump. Close your hand into a fist, then open it fully to pump up the balloon.")
         elif lv == 6:
             self.state = GameState.LEVEL6_FINGER_TAPS
             self.simon_sequence = []
             self.simon_state = "START"
+            VOICE.speak("Level 6: Pattern Tap. Memorize the blinking pattern, then hover over the colored pads in correct order.")
         self.sounds.play('select')
         self.popups.append(ScorePopup(GAME_AREA_WIDTH//2, WINDOW_HEIGHT//2 - 60, "POSTURE FIX: Sit up & keep shoulders relaxed!"))
 
@@ -4324,8 +4948,8 @@ class PhysioSystem:
         h1 = self.font_large.render("SESSION HISTORY", True, (0, 200, 255))
         self.screen.blit(h1, h1.get_rect(center=(cx, 35)))
 
-        sessions = self.db.get_session_history(15)
-        rom_data  = self.db.get_rom_trend(10)
+        sessions = self.db.get_session_history(15, patient_id=self.patient_name)
+        rom_data  = self.db.get_rom_trend(10, patient_id=self.patient_name)
 
         # ── Left: Session Table ──────────────────────────────────────
         table_x = 20
@@ -4411,7 +5035,7 @@ class PhysioSystem:
                 center=(chart_x + chart_w//2, chart_y + chart_h//2)))
         
         # Display ML Progress Prediction below chart
-        pred_pct = self.db.predict_recovery_progress()
+        pred_pct = self.db.predict_recovery_progress(self.patient_name)
         if pred_pct < 0:
             pred_text = self.font_hud.render("Collecting more data...", True, (255, 200, 100))
         else:
@@ -4519,6 +5143,22 @@ class PhysioSystem:
                 self.hand_engine.calibration_active = True
                 self.hand_engine.calibrated_max_extension = self.calibrated_max_extension
                 self.calibration_active = True
+                
+                # Persist calibrated thresholds to DB Patient profile
+                if self.patient_name:
+                    self.db.save_patient(
+                        name=self.patient_name,
+                        age=int(self.patient_age) if self.patient_age.isdigit() else 30,
+                        age_group=self.age_group.value if self.age_group else "adult",
+                        cal_fist_val=self.calibrated_fist_val,
+                        cal_max_ext=self.calibrated_max_extension,
+                        cal_min_ang=self.calibrated_min_angle,
+                        cal_max_ang=self.calibrated_max_angle,
+                        cal_active=1
+                    )
+                    # Refresh profile directory buttons to include any updates
+                    self._refresh_patient_profiles()
+                    print(f"[SUCCESS] Saved calibration for {self.patient_name} in DB.")
                 
                 self.calibration_stage = "COMPLETE"
                 VOICE.speak("Diagnostics complete. Game difficulty dynamically scaled to match your mobility.")
@@ -4738,11 +5378,11 @@ class PhysioSystem:
         if not sessions:
             return
 
-        # Panel sits in the right sidebar strip
+        # Panel sits in the right sidebar strip, below camera & hand status (starting at panel_y=352)
         panel_x = GAME_AREA_WIDTH + 4
-        panel_y = 10
+        panel_y = 352
         panel_w = SIDEBAR_WIDTH - 8
-        panel_h = WINDOW_HEIGHT - 20
+        panel_h = WINDOW_HEIGHT - panel_y - 12
 
         # Background
         pygame.draw.rect(self.screen, (5, 12, 24),
@@ -4752,9 +5392,9 @@ class PhysioSystem:
 
         # CRT Grid in chart area
         chart_x = panel_x + 14
-        chart_y = panel_y + 55
+        chart_y = panel_y + 45
         chart_w = panel_w - 28
-        chart_h = 180
+        chart_h = 130
         
         pygame.draw.rect(self.screen, (2, 8, 15),
                          pygame.Rect(chart_x, chart_y, chart_w, chart_h), border_radius=4)
@@ -4766,9 +5406,9 @@ class PhysioSystem:
 
         # Header
         hdr = self.font_hud.render("ANALYTICS MONITOR", True, (0, 255, 180))
-        self.screen.blit(hdr, hdr.get_rect(center=(panel_x + panel_w // 2, panel_y + 18)))
+        self.screen.blit(hdr, hdr.get_rect(center=(panel_x + panel_w // 2, panel_y + 14)))
         sub = self.font_tiny.render("PATIENT PERFORMANCE HISTORY", True, (0, 150, 120))
-        self.screen.blit(sub, sub.get_rect(center=(panel_x + panel_w // 2, panel_y + 36)))
+        self.screen.blit(sub, sub.get_rect(center=(panel_x + panel_w // 2, panel_y + 30)))
 
         n = len(sessions)
         bar_w = (chart_w - (n - 1) * 6) // n
@@ -4808,7 +5448,7 @@ class PhysioSystem:
         self.screen.blit(gl, (chart_x + 2, goal_y - 14))
 
         # Level trend info below chart
-        y2 = chart_y + chart_h + 30
+        y2 = chart_y + chart_h + 24
         if len(sessions) >= 2:
             latest_acc  = sessions[-1][1]
             prev_acc    = sessions[-2][1]
@@ -4817,7 +5457,7 @@ class PhysioSystem:
             trend_col   = (50, 220, 120) if delta >= 0 else (255, 120, 80)
             ts = self.font_hint.render(trend_str, True, trend_col)
             self.screen.blit(ts, ts.get_rect(center=(panel_x + panel_w // 2, y2)))
-            y2 += 18
+            y2 += 16
 
         # Sessions per level breakdown
         level_counts = {}
@@ -4828,7 +5468,7 @@ class PhysioSystem:
             lc = self.font_hint.render(f"L{lv}: {cnt} session{'s' if cnt>1 else ''}",
                                         True, lcolors[min(lv-1, 2)])
             self.screen.blit(lc, (chart_x, y2))
-            y2 += 18
+            y2 += 16
 
     def _draw_results(self):
         """Draw post-game clinical report screen"""
@@ -4837,9 +5477,6 @@ class PhysioSystem:
                 self.screen, self.session_data, self.best_data,
                 patient_name=self.patient_name or "Patient"
             )
-
-            # ── Progress Chart (last 6 sessions) ────────────────────
-            self._draw_progress_chart()
             
             # PLAY AGAIN, NEXT, MAIN MENU, CLOSE buttons
             self.menu_button.draw(self.screen, self.font_small, text="PLAY AGAIN", base_col=(25,40,25), hov_col=(40,80,40))

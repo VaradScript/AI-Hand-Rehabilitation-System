@@ -30,3 +30,4 @@
 2026-05-21 17:32:25.538296 - Init Error: file is not a database
 2026-05-21 17:40:14.696782 - Init Error: file is not a database
 2026-05-21 17:41:38,765 - Database Error: Failed to save session (locked or missing db): file is not a database
+2026-05-21 18:11:12,273 - Database Error: Failed to save session (locked or missing db): 'charmap' codec can't encode character '\u2713' in position 0: character maps to <undefined>
