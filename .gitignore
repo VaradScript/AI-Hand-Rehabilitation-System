@@ -19,3 +19,6 @@ ENV/
 
 # Batch files (optional, but good to ignore the push script itself)
 push_repo.bat
+
+# Clinical Reports (privacy and local session logs)
+reports/
