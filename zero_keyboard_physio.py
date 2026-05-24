@@ -631,19 +631,37 @@ class HandEngine:
                     # Get hand label (Left/Right)
                     label = results.multi_handedness[i].classification[0].label
                     
-                    # Draw neon cyber landmarks
-                    # Green bones for Right, Purple for Left
-                    bone_col = (0, 255, 180) if label == "Right" else (200, 100, 255)
-                    self.mp_draw.draw_landmarks(
-                        annotated, hand_landmarks, self.mp_hands.HAND_CONNECTIONS,
-                        self.mp_draw.DrawingSpec(color=bone_col, thickness=2, circle_radius=2),
-                        self.mp_draw.DrawingSpec(color=(255, 255, 255), thickness=1)
-                    )
-                    
-                    # Process the first hand detected as the primary controller
+                    # Process primary hand data to get real-time flex/stretch metrics
+                    hand_angle = 180.0
+                    temp_hand_data = HandData()
                     if i == 0:
                         new_hand_data = self._process_landmarks(hand_landmarks)
                         new_hand_data.hand_label = label
+                        temp_hand_data = new_hand_data
+                        if temp_hand_data.knuckle_angles and len(temp_hand_data.knuckle_angles) > 0:
+                            hand_angle = temp_hand_data.knuckle_angles[0]
+                    else:
+                        temp_hand_data = self._process_landmarks(hand_landmarks)
+                        if temp_hand_data.knuckle_angles and len(temp_hand_data.knuckle_angles) > 0:
+                            hand_angle = temp_hand_data.knuckle_angles[0]
+                            
+                    # Determine dynamic cyber-medical colors based on stretch quality
+                    if hand_angle > 155:
+                        bone_col = (0, 255, 200) # Glowing neon cyan for full extension/stretch
+                        node_col = (255, 255, 255)
+                    elif hand_angle < 110:
+                        bone_col = (255, 120, 0) # Glowing amber orange for deep flexion/fist
+                        node_col = (255, 200, 100)
+                    else:
+                        bone_col = (0, 180, 255) # Sleek sci-fi blue for transition range
+                        node_col = (200, 220, 255)
+                        
+                    # Draw thicker neon landmarks for easier webcam visibility from a distance
+                    self.mp_draw.draw_landmarks(
+                        annotated, hand_landmarks, self.mp_hands.HAND_CONNECTIONS,
+                        self.mp_draw.DrawingSpec(color=bone_col, thickness=3, circle_radius=3),
+                        self.mp_draw.DrawingSpec(color=node_col, thickness=1)
+                    )
             
             with self.lock:
                 self.hand_data = new_hand_data
@@ -1544,7 +1562,27 @@ class MedicalSidebar:
         # ── Camera feed ─────────────────────────────────────────────
         cam_y = 55
         cam_drawn = False
-        if camera_frame is not None:
+        
+        # Prevent duplicate camera feed in Results screen when central Alignment Mirror is active
+        redirected = is_results and hand_data.index_tip is None
+        
+        if redirected:
+            try:
+                feed_h = int(self.width * 0.75)
+                cam_rect = pygame.Rect(self.x + 10, cam_y - 2, self.width - 20, feed_h + 4)
+                pygame.draw.rect(screen, (15, 20, 30), cam_rect, border_radius=6)
+                pygame.draw.rect(screen, (255, 80, 80), cam_rect, 1, border_radius=6)
+                
+                nc_txt1 = self.font_label.render("MIRROR MODE REDIRECTED", True, (255, 80, 80))
+                nc_txt2 = self.font_label.render("REFER TO CENTER SCREEN", True, (150, 170, 190))
+                screen.blit(nc_txt1, nc_txt1.get_rect(center=(cam_rect.centerx, cam_rect.centery - 12)))
+                screen.blit(nc_txt2, nc_txt2.get_rect(center=(cam_rect.centerx, cam_rect.centery + 12)))
+                
+                y_offset = cam_y + feed_h + 20
+                cam_drawn = True
+            except Exception:
+                pass
+        elif camera_frame is not None:
             try:
                 feed_h = int(self.width * 0.75)
                 frame_resized = cv2.resize(camera_frame, (self.width - 24, feed_h))
@@ -2171,7 +2209,7 @@ class PhysioSystem:
     
     def __init__(self):
         pygame.init()
-        self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+        self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.RESIZABLE | pygame.DOUBLEBUF | pygame.SCALED)
         pygame.display.set_caption("Zero-Keyboard AI Physiotherapy System")
         self.clock = pygame.time.Clock()
         
@@ -2307,7 +2345,7 @@ class PhysioSystem:
         self.quick_start_button.duration = 2.0
         
         # Repositioned buttons to prevent footer overlap
-        btn_y = 575
+        btn_y = 495
         bw, bh = 170, 44
         cx = GAME_AREA_WIDTH // 2
         
@@ -2354,9 +2392,9 @@ class PhysioSystem:
             left_x = 50
             cam_x = WINDOW_WIDTH - 480 - 40 # 760
             input_w = cam_x - left_x - 40   # 670
-            btn_y = 615
+            btn_y = 515
             btn_w = (input_w - 20) // 3     # 216
-            btn_h = 60
+            btn_h = 50
             
             for i, p in enumerate(top_patients):
                 px = left_x + i * (btn_w + 10)
@@ -2623,7 +2661,7 @@ class PhysioSystem:
         if self.state not in [GameState.MAIN_MENU, GameState.RESULTS,
                                GameState.LEVEL_COMPLETE, GameState.PAIN_SCALE,
                                GameState.HISTORY, GameState.PATIENT_REGISTRATION,
-                               GameState.AGE_SELECT, GameState.CLOUD_SYNC, GameState.CALIBRATION, GameState.THERAPIST_DASHBOARD]:
+                               GameState.AGE_SELECT, GameState.CLOUD_SYNC, GameState.THERAPIST_DASHBOARD]:
             
             # Check if we are in an active gameplay level where making a fist is part of the therapy
             gameplay_states = [
@@ -2636,12 +2674,13 @@ class PhysioSystem:
             ]
             is_gameplay = self.state in gameplay_states
             
-            # Trigger 1: Hover-to-Select on HomeIcon (disable global fist trigger during active gameplay)
-            home_hover_exit = self.home_icon.update(False if is_gameplay else hand_data.is_fist, hand_data.index_tip)
+            # Trigger 1: Hover-to-Select on HomeIcon (disable global fist trigger during active gameplay or calibration)
+            fist_trigger_disabled = is_gameplay or (self.state == GameState.CALIBRATION)
+            home_hover_exit = self.home_icon.update(False if fist_trigger_disabled else hand_data.is_fist, hand_data.index_tip)
             
-            # Trigger 2: Global Fist hold countdown anywhere on the screen (disabled during active gameplay)
+            # Trigger 2: Global Fist hold countdown anywhere on the screen (disabled during active gameplay or calibration)
             global_fist_exit = False
-            if not is_gameplay and hand_data.is_fist:
+            if not is_gameplay and self.state != GameState.CALIBRATION and hand_data.is_fist:
                 if not hasattr(self, '_global_fist_start') or self._global_fist_start is None:
                     self._global_fist_start = time.time()
                 elapsed = time.time() - self._global_fist_start
@@ -2971,7 +3010,7 @@ class PhysioSystem:
         
         # Update falling items
         for item in self.falling_items[:]:
-            item.y += item.speed * speed_mult
+            item.y += item.speed * speed_mult * getattr(self, 'pacing_multiplier', 1.0)
             
             # Check collision with basket
             if (item.y >= self.basket_y - 20 and 
@@ -3020,6 +3059,9 @@ class PhysioSystem:
                     self.accuracy_hits += 1
                     self.accuracy_attempts += 1  # Count attempt only when item resolves
                     self.combo += 1
+                    self.consecutive_misses = 0 # reset misses on hit
+                    if self.combo > 0 and self.combo % 8 == 0:
+                        self._adjust_pacing("fast")
                     self._trigger_feedback()
                     self.sounds.play('catch')
                     self.particles.emit(int(item.x), self.basket_y, COLOR_SUCCESS, 10)
@@ -3030,6 +3072,10 @@ class PhysioSystem:
                 if not item.is_bomb and not item.is_powerup and not getattr(item, 'is_shield', False) and not getattr(item, 'is_freeze', False):
                     self.accuracy_attempts += 1  # Missed a catchable item
                     self.combo = 0  # Reset combo on miss (but not for bombs/powerups)
+                    self.consecutive_misses += 1
+                    if self.consecutive_misses >= 3:
+                        self.consecutive_misses = 0
+                        self._adjust_pacing("slow")
         
         # Spawn new items
         if len(self.falling_items) < 3 and random.random() < 0.02:
@@ -3044,7 +3090,7 @@ class PhysioSystem:
         # Update seeds
         for seed in self.seeds[:]:
             if not seed.grabbed:
-                seed.y += seed.speed
+                seed.y += seed.speed * getattr(self, 'pacing_multiplier', 1.0)
                 
                 # Check pinch grab
                 if hand_data.is_pinching and hand_data.index_tip:
@@ -3066,6 +3112,9 @@ class PhysioSystem:
                             self.score += points
                             self.accuracy_hits += 1
                             self.combo += 1
+                            self.consecutive_misses = 0 # reset misses on pot success
+                            if self.combo > 0 and self.combo % 6 == 0:
+                                self._adjust_pacing("fast")
                             self._trigger_feedback()
                             self.sounds.play('catch')
                             color = (255, 215, 0) if seed.is_golden else COLOR_SUCCESS
@@ -3078,6 +3127,11 @@ class PhysioSystem:
             # Remove if off screen
             if seed.y > WINDOW_HEIGHT and not seed.grabbed:
                 self.seeds.remove(seed)
+                self.combo = 0 # Missed a seed
+                self.consecutive_misses += 1
+                if self.consecutive_misses >= 3:
+                    self.consecutive_misses = 0
+                    self._adjust_pacing("slow")
         
         # Spawn new seeds
         if len(self.seeds) < 2 and random.random() < 0.015:
@@ -3092,7 +3146,7 @@ class PhysioSystem:
         # Time-based movement for the target (Figure 8 pattern)
         theme = self._get_theme()
         speed_mult = theme.get("speed_multiplier", 1.0)
-        self.trace_t += 0.008 * speed_mult
+        self.trace_t += 0.008 * speed_mult * getattr(self, 'pacing_multiplier', 1.0)
         
         # Figure 8 (Lissajous curve) parameters
         cx = GAME_AREA_WIDTH // 2
@@ -3116,8 +3170,10 @@ class PhysioSystem:
             # Record every few frames for accuracy
             if int(self.trace_t * 100) % 5 == 0:
                 self.accuracy_attempts += 1
+                self.recent_tracing_attempts += 1
                 if dist < 85: # Good trace radius (was 60)
                     self.accuracy_hits += 1
+                    self.recent_tracing_hits += 1
                     self.score += int(5 * self.score_multiplier)
                     
                     if dist < 45: # Perfect trace (was 30)
@@ -3125,6 +3181,16 @@ class PhysioSystem:
                         self.particles.emit(int(self.trace_target_x), int(self.trace_target_y), COLOR_SUCCESS, 2)
                 else:
                     self.combo = 0 # Lost combo
+                
+                # Check dynamic pacing every 15 checks
+                if self.recent_tracing_attempts >= 15:
+                    ratio = self.recent_tracing_hits / self.recent_tracing_attempts
+                    if ratio >= 0.85 and self.pacing_multiplier < 1.3:
+                        self._adjust_pacing("fast")
+                    elif ratio < 0.50 and self.pacing_multiplier > 0.6:
+                        self._adjust_pacing("slow")
+                    self.recent_tracing_attempts = 0
+                    self.recent_tracing_hits = 0
             
             # Trigger feedback occasionally
             if self.combo > 0 and self.combo % 20 == 0 and int(self.trace_t * 100) % 5 == 0:
@@ -3138,9 +3204,13 @@ class PhysioSystem:
 
     def _update_level5(self, hand_data: HandData):
         """Level 5: Grip & Release (Spasticity Pump)"""
-        # Constantly deflate slowly
+        # Constantly deflate slowly (deflation rate adapts to pacing)
         if self.balloon_scale > 1.0:
-            self.balloon_scale -= 0.005
+            self.balloon_scale -= 0.005 * getattr(self, 'pacing_multiplier', 1.0)
+            
+        # If no rep completed for 8 seconds, slow down the deflation rate (make it easier)
+        if not hasattr(self, 'last_rep_time'):
+            self.last_rep_time = time.time()
             
         if hand_data.is_fist and self.pump_state == 0:
             self.pump_state = 1
@@ -3152,6 +3222,9 @@ class PhysioSystem:
             self.accuracy_hits += 1
             self.accuracy_attempts += 1
             self.combo += 1
+            self.last_rep_time = time.time() # Reset trigger timer on success
+            if self.combo > 0 and self.combo % 3 == 0:
+                self._adjust_pacing("fast")
             self.balloon_scale = min(2.0, self.balloon_scale + 0.5)
             self.score += int(15 * self.score_multiplier)
             self.sounds.play('pop')
@@ -3160,6 +3233,11 @@ class PhysioSystem:
             
             if self.combo % 3 == 0:
                 self._trigger_feedback()
+                
+        if time.time() - self.last_rep_time > 8.0:
+            self.last_rep_time = time.time() # Reset trigger timer
+            if self.pacing_multiplier > 0.6:
+                self._adjust_pacing("slow")
                 
         # End after 30 seconds
         if (time.time() - self.session_start > 30) or (time.time() - getattr(self, 'level_wall_start', 0.0) > LEVEL_DURATION * 1.5):
@@ -3537,7 +3615,7 @@ class PhysioSystem:
         title = self.font_large.render("CLINICAL REGISTRATION PORTAL", True, (0, 200, 150))
         scr.blit(title, title.get_rect(center=(cx, 35)))
 
-        y_start = 110
+        y_start = 90
         
         # ── Massive Diagnostic Camera Panel (Right Side) ───────────────
         cam_w, cam_h = 480, 360
@@ -3599,7 +3677,7 @@ class PhysioSystem:
         scr.blit(ns, ns_rect)
 
         # Patient Age Field
-        y_age = y_start + 110
+        y_age = y_start + 90
         age_active = self.input_active == "age"
         age_col = (0, 255, 200) if age_active else (60, 100, 120)
         scr.blit(self.font_hint.render("PATIENT AGE", True, age_col), (left_x, y_age))
@@ -3632,22 +3710,22 @@ class PhysioSystem:
             scr.blit(mode_tag, mode_tag.get_rect(midleft=(left_x + input_w // 2 + 15, age_box.centery)))
 
         # ── Medical Sub-Panel ──────────────────────────────────────────
-        y_info = y_age + 110
-        info_rect = pygame.Rect(left_x, y_info, input_w, 140)
+        y_info = y_age + 90
+        info_rect = pygame.Rect(left_x, y_info, input_w, 120)
         pygame.draw.rect(scr, (10, 18, 28), info_rect, border_radius=8)
         pygame.draw.rect(scr, (0, 100, 150), info_rect, 1, border_radius=8)
         
-        scr.blit(self.font_small.render("DIAGNOSTIC PROTOCOL:", True, (0, 180, 255)), (left_x + 15, y_info + 15))
-        scr.blit(self.font_hint.render("1. Stand 1-2 meters from the camera", True, (150, 180, 200)), (left_x + 15, y_info + 45))
-        scr.blit(self.font_hint.render("2. Ensure room is well-lit for tracking", True, (150, 180, 200)), (left_x + 15, y_info + 70))
-        scr.blit(self.font_hint.render("3. Complete registration to unlock therapies", True, (150, 180, 200)), (left_x + 15, y_info + 95))
+        scr.blit(self.font_small.render("DIAGNOSTIC PROTOCOL:", True, (0, 180, 255)), (left_x + 15, y_info + 12))
+        scr.blit(self.font_hint.render("1. Stand 1-2 meters from the camera", True, (150, 180, 200)), (left_x + 15, y_info + 38))
+        scr.blit(self.font_hint.render("2. Ensure room is well-lit for tracking", True, (150, 180, 200)), (left_x + 15, y_info + 60))
+        scr.blit(self.font_hint.render("3. Complete registration to unlock therapies", True, (150, 180, 200)), (left_x + 15, y_info + 82))
 
         # ── Controls & Launch ──────────────────────────────────────────
         c_txt = "TAB: Switch Field | ENTER: Launch Therapy Session"
         c_surf = self.font_hint.render(c_txt, True, (80, 120, 160))
-        scr.blit(c_surf, c_surf.get_rect(center=(left_x + input_w // 2, y_info + 165)))
+        scr.blit(c_surf, c_surf.get_rect(center=(left_x + input_w // 2, y_info + 135)))
 
-        btn_rect = pygame.Rect(left_x, y_info + 190, input_w, 60)
+        btn_rect = pygame.Rect(left_x, y_info + 155, input_w, 50)
         
         # Unify button rendering using CloseButton for both empty and filled states to support hover click operations
         if hasattr(self, 'quick_start_button'):
@@ -3666,7 +3744,7 @@ class PhysioSystem:
         # ── Previous Patient Profiles Directory ───────────────────────
         if hasattr(self, 'patient_profile_buttons') and self.patient_profile_buttons:
             lbl_surf = self.font_hint.render("SELECT PREVIOUS CLINICAL PROFILE:", True, (0, 255, 180))
-            scr.blit(lbl_surf, (left_x, 590))
+            scr.blit(lbl_surf, (left_x, 490))
             for name, btn in self.patient_profile_buttons.items():
                 btn.draw(
                     scr, self.font_hint, name,
@@ -4717,6 +4795,26 @@ class PhysioSystem:
         elif self.combo >= 2:
             self.feedback_text = "GOOD!"
             self.feedback_timer = 30
+            
+    def _adjust_pacing(self, change_type: str):
+        """Dynamic pacing adjustment with sound cues and visual popup HUD alerts."""
+        now = time.time()
+        should_speak = (now - getattr(self, 'last_pacing_voice_time', 0.0)) > 10.0
+
+        if change_type == "slow":
+            self.pacing_multiplier = max(0.5, self.pacing_multiplier - 0.15)
+            self.sounds.play('select')
+            self.popups.append(ScorePopup(GAME_AREA_WIDTH // 2 - 80, WINDOW_HEIGHT // 2, "PACING: SLOWER", (255, 128, 0)))
+            if should_speak:
+                VOICE.speak("Pacing adjusted. Let's take it slow and steady.")
+                self.last_pacing_voice_time = now
+        elif change_type == "fast":
+            self.pacing_multiplier = min(1.4, self.pacing_multiplier + 0.1)
+            self.sounds.play('level_complete')
+            self.popups.append(ScorePopup(GAME_AREA_WIDTH // 2 - 80, WINDOW_HEIGHT // 2, "PACING: FASTER!", COLOR_SUCCESS))
+            if should_speak:
+                VOICE.speak("Excellent coordination! Pacing up slightly.")
+                self.last_pacing_voice_time = now
     
     def _update_results(self, hand_data: HandData):
         """Update results screen"""
@@ -4768,6 +4866,11 @@ class PhysioSystem:
         self.reach_distance = 0
         self.accuracy_hits = 0
         self.accuracy_attempts = 0
+        self.pacing_multiplier = 1.0
+        self.consecutive_misses = 0
+        self.last_pacing_voice_time = 0.0
+        self.recent_tracing_attempts = 0
+        self.recent_tracing_hits = 0
         if lv == 1:
             self.state = GameState.LEVEL1_FLEXIBILITY
             self._spawn_bubbles()
@@ -5478,15 +5581,56 @@ class PhysioSystem:
                 patient_name=self.patient_name or "Patient"
             )
             
+            # Check hand tracking status for Results screen
+            hand_data = self.hand_engine.get_hand_data()
+            if hand_data.index_tip is None:
+                # Hand is lost! Draw a beautiful floating "Webcam Hand Alignment Mirror" PIP overlay
+                # inside the main game area to guide the patient
+                frame = self.hand_engine.get_frame()
+                if frame is not None:
+                    try:
+                        pip_w, pip_h = 320, 240
+                        pip_x = (GAME_AREA_WIDTH - pip_w) // 2
+                        pip_y = 200 # Centered vertical alignment
+                        
+                        # Draw glassmorphic background plate
+                        pip_surface = pygame.Surface((pip_w + 40, pip_h + 80), pygame.SRCALPHA)
+                        pygame.draw.rect(pip_surface, (10, 16, 28, 220), (0, 0, pip_w + 40, pip_h + 80), border_radius=10)
+                        pygame.draw.rect(pip_surface, (255, 80, 80, 255), (0, 0, pip_w + 40, pip_h + 80), 2, border_radius=10)
+                        self.screen.blit(pip_surface, (pip_x - 20, pip_y - 40))
+                        
+                        # Label
+                        lbl = self.font_medium.render("ALIGN HAND IN CAMERA FEED", True, (255, 80, 80))
+                        self.screen.blit(lbl, lbl.get_rect(center=(GAME_AREA_WIDTH // 2, pip_y - 18)))
+                        
+                        # Resize and render frame
+                        frame_resized = cv2.resize(frame, (pip_w, pip_h))
+                        frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+                        frame_surf = pygame.surfarray.make_surface(frame_rgb.swapaxes(0, 1))
+                        
+                        # Render frame inside panel
+                        self.screen.blit(frame_surf, (pip_x, pip_y))
+                        
+                        # Technical outline corners for high tech sci-fi visual
+                        l = 20
+                        c = (255, 80, 80)
+                        pygame.draw.line(self.screen, c, (pip_x, pip_y), (pip_x + l, pip_y), 3)
+                        pygame.draw.line(self.screen, c, (pip_x, pip_y), (pip_x, pip_y + l), 3)
+                        pygame.draw.line(self.screen, c, (pip_x + pip_w, pip_y), (pip_x + pip_w - l, pip_y), 3)
+                        pygame.draw.line(self.screen, c, (pip_x + pip_w, pip_y), (pip_x + pip_w, pip_y + l), 3)
+                        pygame.draw.line(self.screen, c, (pip_x, pip_y + pip_h), (pip_x + l, pip_y + pip_h), 3)
+                        pygame.draw.line(self.screen, c, (pip_x, pip_y + pip_h), (pip_x, pip_y + pip_h - l), 3)
+                        pygame.draw.line(self.screen, c, (pip_x + pip_w, pip_y + pip_h), (pip_x + pip_w - l, pip_y + pip_h), 3)
+                        pygame.draw.line(self.screen, c, (pip_x + pip_w, pip_y + pip_h), (pip_x + pip_w, pip_y + pip_h - l), 3)
+                    except Exception:
+                        pass
+            
             # PLAY AGAIN, NEXT, MAIN MENU, CLOSE buttons
             self.menu_button.draw(self.screen, self.font_small, text="PLAY AGAIN", base_col=(25,40,25), hov_col=(40,80,40))
             if hasattr(self, 'next_button') and getattr(self, 'current_level', 1) < 6:
                 self.next_button.draw(self.screen, self.font_small, text="NEXT GAME", base_col=(25,25,50), hov_col=(40,40,80))
             self.home_button.draw(self.screen, self.font_small, text="MAIN MENU", base_col=(60,30,90), hov_col=(100,50,150))
             self.close_button.draw(self.screen, self.font_small)
-
-            # Cursor is drawn by the main drawing loop because GameState.RESULTS now has sidebar enabled
-            pass
 
     def _draw_cloud_sync(self):
         """Draw fake cloud sync animation"""
