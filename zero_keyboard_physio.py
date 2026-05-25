@@ -1531,7 +1531,8 @@ class MedicalSidebar:
     # ------------------------------------------------------------------
     def draw(self, screen, camera_frame, hand_data: HandData,
              level_goals: str, accuracy_hits: int = 0,
-             accuracy_attempts: int = 0, is_results: bool = False):
+             accuracy_attempts: int = 0, is_results: bool = False,
+             is_calibration: bool = False):
         """Draw sidebar with camera and clinical stats"""
 
         # ── Background ──────────────────────────────────────────────
@@ -1563,18 +1564,24 @@ class MedicalSidebar:
         cam_y = 55
         cam_drawn = False
         
-        # Prevent duplicate camera feed in Results screen when central Alignment Mirror is active
-        redirected = is_results and hand_data.index_tip is None
+        # Prevent duplicate camera feed in Results screen when central Alignment Mirror is active,
+        # or in Diagnostics screen when the central diagnostic camera is active.
+        redirected = (is_results and hand_data.index_tip is None) or is_calibration
         
         if redirected:
             try:
                 feed_h = int(self.width * 0.75)
                 cam_rect = pygame.Rect(self.x + 10, cam_y - 2, self.width - 20, feed_h + 4)
                 pygame.draw.rect(screen, (15, 20, 30), cam_rect, border_radius=6)
-                pygame.draw.rect(screen, (255, 80, 80), cam_rect, 1, border_radius=6)
+                pygame.draw.rect(screen, (0, 200, 255) if is_calibration else (255, 80, 80), cam_rect, 1, border_radius=6)
                 
-                nc_txt1 = self.font_label.render("MIRROR MODE REDIRECTED", True, (255, 80, 80))
-                nc_txt2 = self.font_label.render("REFER TO CENTER SCREEN", True, (150, 170, 190))
+                if is_calibration:
+                    nc_txt1 = self.font_label.render("DIAGNOSTICS ACTIVE", True, (0, 200, 255))
+                    nc_txt2 = self.font_label.render("REFER TO CENTER SCANNER", True, (150, 170, 190))
+                else:
+                    nc_txt1 = self.font_label.render("MIRROR MODE REDIRECTED", True, (255, 80, 80))
+                    nc_txt2 = self.font_label.render("REFER TO CENTER SCREEN", True, (150, 170, 190))
+                
                 screen.blit(nc_txt1, nc_txt1.get_rect(center=(cam_rect.centerx, cam_rect.centery - 12)))
                 screen.blit(nc_txt2, nc_txt2.get_rect(center=(cam_rect.centerx, cam_rect.centery + 12)))
                 
@@ -2753,9 +2760,9 @@ class PhysioSystem:
                 self.state = GameState.MAIN_MENU
                 self._reset_game()
         elif self.state == GameState.THERAPIST_DASHBOARD:
-            if getattr(self, 'admin_back_button', None):
-                if self.admin_back_button.update(hand_data.index_tip) or (hand_data.is_fist and self.home_icon.update(True, hand_data.index_tip)):
-                    self.state = GameState.MAIN_MENU
+            self._update_therapist_dashboard(hand_data)
+            if self.admin_back_button.update(hand_data.index_tip) or (hand_data.is_fist and self.home_icon.update(True, hand_data.index_tip)):
+                self.state = GameState.MAIN_MENU
                     
         # Update visual effects
         self.particles.update()
@@ -3399,7 +3406,8 @@ class PhysioSystem:
             goals = self._get_level_goals()
             self.sidebar.draw(self.screen, camera_frame, hand_data, goals,
                               self.accuracy_hits, self.accuracy_attempts,
-                              is_results=(self.state == GameState.RESULTS))
+                              is_results=(self.state == GameState.RESULTS),
+                              is_calibration=(self.state == GameState.CALIBRATION))
 
             # Draw progress chart over the bottom half of the sidebar on Results screen
             if self.state == GameState.RESULTS:
@@ -5666,9 +5674,9 @@ class PhysioSystem:
     def _update_therapist_dashboard(self, hand_data):
         global LEVEL_DURATION
         if not hasattr(self, 'admin_back_button'):
-            self.admin_back_button = LevelButton(50, 50, 250, 80, "EXIT ADMIN", 0)
-            self.admin_purge_button = LevelButton(50, 200, 350, 80, "PURGE ALL PATIENT DATA", 99)
-            self.admin_timer_button = LevelButton(50, 350, 350, 80, f"LEVEL DURATION: {LEVEL_DURATION}s", 88)
+            self.admin_back_button = LevelButton(50, 150, 250, 80, "EXIT ADMIN", 0)
+            self.admin_purge_button = LevelButton(50, 270, 350, 80, "PURGE ALL PATIENT DATA", 99)
+            self.admin_timer_button = LevelButton(50, 390, 350, 80, f"LEVEL DURATION: {LEVEL_DURATION}s", 88)
             
         if self.admin_purge_button.update(hand_data.index_tip):
             try:
@@ -5685,7 +5693,7 @@ class PhysioSystem:
     def _draw_therapist_dashboard(self):
         self.screen.fill((20, 10, 15)) # Dark red/black to indicate admin mode
         title = self.font_large.render("THERAPIST CONFIGURATION PANEL", True, (255, 100, 100))
-        self.screen.blit(title, (50, 100))
+        self.screen.blit(title, (50, 50))
         
         self.admin_back_button.draw(self.screen, self.font_medium, base_col=(100, 40, 40), hov_col=(150, 50, 50))
         self.admin_purge_button.draw(self.screen, self.font_medium, base_col=(180, 20, 20), hov_col=(255, 40, 40))
