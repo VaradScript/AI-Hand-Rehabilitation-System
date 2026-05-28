@@ -5006,18 +5006,24 @@ class PhysioSystem:
             lbl = self.font_medium.render(
                 f"Pain: {hover_i}/10 — {descriptors[hover_i]}   Hold 1.5s to confirm",
                 True, colors_nrs[hover_i])
-            self.screen.blit(lbl, lbl.get_rect(center=(cx, cy + 120)))
+            self.screen.blit(lbl, lbl.get_rect(center=(cx, cy + 105)))
         else:
             hint = self.font_small.render(
                 "Point your index finger at a number to select",
                 True, (80, 120, 160))
-            self.screen.blit(hint, hint.get_rect(center=(cx, cy + 120)))
+            self.screen.blit(hint, hint.get_rect(center=(cx, cy + 105)))
+
+        # Floating PIP Hand Alignment Camera
+        pip_w, pip_h = 240, 180
+        pip_x = cx - pip_w // 2
+        pip_y = 495
+        self._draw_camera_preview(pip_x, pip_y, pip_w, pip_h, label="PAIN ASSESS HAND ALIGNMENT")
 
         # Clinical note
         note = self.font_hint.render(
             "NRS (Numeric Rating Scale) — your pain score is saved with this session for clinical tracking",
             True, (60, 90, 130))
-        self.screen.blit(note, note.get_rect(center=(cx, WINDOW_HEIGHT - 30)))
+        self.screen.blit(note, note.get_rect(center=(cx, WINDOW_HEIGHT - 22)))
 
         # Cursor
         hand_data = self.hand_engine.get_hand_data()
