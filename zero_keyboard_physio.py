@@ -1532,7 +1532,8 @@ class MedicalSidebar:
     def draw(self, screen, camera_frame, hand_data: HandData,
              level_goals: str, accuracy_hits: int = 0,
              accuracy_attempts: int = 0, is_results: bool = False,
-             is_calibration: bool = False):
+             is_calibration: bool = False, is_mirror_active: bool = False,
+             is_paused: bool = False):
         """Draw sidebar with camera and clinical stats"""
 
         # ── Background ──────────────────────────────────────────────
@@ -1564,9 +1565,9 @@ class MedicalSidebar:
         cam_y = 55
         cam_drawn = False
         
-        # Prevent duplicate camera feed in Results screen when central Alignment Mirror is active,
-        # or in Diagnostics screen when the central diagnostic camera is active.
-        redirected = (is_results and hand_data.index_tip is None) or is_calibration
+        # Prevent duplicate camera feed in Diagnostics screen when the central diagnostic camera is active.
+        # On all other screens, the camera feed stays active permanently in the sidebar.
+        redirected = is_calibration
         
         if redirected:
             try:
@@ -1596,22 +1597,35 @@ class MedicalSidebar:
                 frame_rgb     = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
                 frame_surface = pygame.surfarray.make_surface(frame_rgb.swapaxes(0, 1))
                 
-                # Draw high-tech camera border
+                # Check if hand tracking is lost (turns border red and overlays warning banner inside sidebar feed)
+                is_hand_lost = (hand_data.index_tip is None)
+                
+                # Draw high-tech camera border (color turns red when hand is lost)
                 cam_rect = pygame.Rect(self.x + 10, cam_y - 2, self.width - 20, feed_h + 4)
                 pygame.draw.rect(screen, (10, 20, 30), cam_rect, border_radius=6)
-                pygame.draw.rect(screen, (0, 150, 255), cam_rect, 2, border_radius=6)
+                
+                border_color = (255, 80, 80) if is_hand_lost else (0, 150, 255)
+                pygame.draw.rect(screen, border_color, cam_rect, 2, border_radius=6)
                 
                 screen.blit(frame_surface, (self.x + 12, cam_y))
                 
                 # Tech corners
                 l = 15
-                c = (0, 255, 150)
+                c = (255, 80, 80) if is_hand_lost else (0, 255, 150)
                 px, py = self.x + 12, cam_y
                 pw, ph = self.width - 24, feed_h
                 pygame.draw.line(screen, c, (px, py), (px+l, py), 2)
                 pygame.draw.line(screen, c, (px, py), (px, py+l), 2)
                 pygame.draw.line(screen, c, (px+pw, py), (px+pw-l, py), 2)
                 pygame.draw.line(screen, c, (px+pw, py), (px+pw, py+l), 2)
+                
+                # Overlay warning banner on camera feed when hand is lost
+                if is_hand_lost:
+                    warn_surface = pygame.Surface((self.width - 24, 32), pygame.SRCALPHA)
+                    warn_surface.fill((255, 40, 40, 160)) # semi-transparent red
+                    screen.blit(warn_surface, (self.x + 12, cam_y + feed_h - 32))
+                    warn_txt = self.font_label.render("ALIGN HAND IN FEED", True, (255, 255, 255))
+                    screen.blit(warn_txt, warn_txt.get_rect(center=(self.x + self.width // 2, cam_y + feed_h - 16)))
                 
                 y_offset = cam_y + feed_h + 20
                 cam_drawn = True
@@ -2718,6 +2732,8 @@ class PhysioSystem:
                 self.session_start += dt
         else:
             self.tracking_lost = False
+            if is_playing:
+                self.game_has_started = True
             
         # State machine
         if self.state == GameState.PATIENT_REGISTRATION:
@@ -3407,7 +3423,9 @@ class PhysioSystem:
             self.sidebar.draw(self.screen, camera_frame, hand_data, goals,
                               self.accuracy_hits, self.accuracy_attempts,
                               is_results=(self.state == GameState.RESULTS),
-                              is_calibration=(self.state == GameState.CALIBRATION))
+                              is_calibration=(self.state == GameState.CALIBRATION),
+                              is_mirror_active=getattr(self, 'results_mirror_active', False),
+                              is_paused=getattr(self, 'tracking_lost', False))
 
             # Draw progress chart over the bottom half of the sidebar on Results screen
             if self.state == GameState.RESULTS:
@@ -3446,27 +3464,43 @@ class PhysioSystem:
 
             hud_font = self.font_hud  # cached — no per-frame allocation
 
-            # Tracking Lost Overlay (Pause)
+            # Tracking Lost Overlay (Pause / Ready)
             if getattr(self, 'tracking_lost', False):
                 pause_surf = pygame.Surface((GAME_AREA_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
                 pause_surf.fill((0, 0, 0, 200)) # Darker background
                 self.screen.blit(pause_surf, (0, 0))
                 
-                # Draw MASSIVE neon pause box
+                # Draw MASSIVE neon pause/ready box
                 box_w, box_h = 700, 250
                 box_x = (GAME_AREA_WIDTH - box_w) // 2
                 box_y = (WINDOW_HEIGHT - box_h) // 2
                 box_rect = pygame.Rect(box_x, box_y, box_w, box_h)
                 
-                # Glowing border effect
-                pygame.draw.rect(self.screen, (255, 30, 60), pygame.Rect(box_x-4, box_y-4, box_w+8, box_h+8), border_radius=20)
-                pygame.draw.rect(self.screen, (20, 10, 15), box_rect, border_radius=15)
-                pygame.draw.rect(self.screen, (255, 100, 100), box_rect, 4, border_radius=15)
+                has_started = getattr(self, 'game_has_started', False)
                 
-                warn_text = self.font_large.render("SYSTEM PAUSED", True, (255, 60, 60))
+                # Determine colors and text based on whether the game has actually started
+                if has_started:
+                    border_outer_color = (255, 30, 60)   # Glowing warning red
+                    border_inner_color = (255, 100, 100)
+                    title_text = "SYSTEM PAUSED"
+                    title_color = (255, 60, 60)
+                    desc_text = "PLEASE RETURN HAND TO CAMERA VIEW"
+                else:
+                    border_outer_color = (0, 180, 255)   # Glowing cyber cyan
+                    border_inner_color = (0, 255, 200)
+                    title_text = "READY? SHOW HAND TO START"
+                    title_color = (0, 220, 255)
+                    desc_text = "POSITION INDEX FINGER IN CAMERA FRAME TO BEGIN"
+                
+                # Glowing border effect
+                pygame.draw.rect(self.screen, border_outer_color, pygame.Rect(box_x-4, box_y-4, box_w+8, box_h+8), border_radius=20)
+                pygame.draw.rect(self.screen, (20, 10, 15), box_rect, border_radius=15)
+                pygame.draw.rect(self.screen, border_inner_color, box_rect, 4, border_radius=15)
+                
+                warn_text = self.font_large.render(title_text, True, title_color)
                 self.screen.blit(warn_text, warn_text.get_rect(center=(box_x + box_w//2, box_y + 80)))
                 
-                sub_text = self.font_medium.render("PLEASE RETURN HAND TO CAMERA VIEW", True, (255, 255, 255))
+                sub_text = self.font_medium.render(desc_text, True, (255, 255, 255))
                 self.screen.blit(sub_text, sub_text.get_rect(center=(box_x + box_w//2, box_y + 160)))
 
             # Score
@@ -3867,11 +3901,11 @@ class PhysioSystem:
         remaining = sum(1 for b in self.bubbles if not b.popped)
         counter_text = self.font_hint.render(
             f"Bubbles: {remaining} / {total_bubbles}", True, (180, 210, 230))
-        self.screen.blit(counter_text, (50, 90))
+        self.screen.blit(counter_text, (50, 115))
 
         # Dot row showing bubble status
         dot_x = 50
-        dot_y = 112
+        dot_y = 142
         for bubble in self.bubbles:
             dot_color = primary if not bubble.popped else (50, 55, 75)
             pygame.draw.circle(self.screen, dot_color, (dot_x, dot_y), 6)
@@ -4826,6 +4860,16 @@ class PhysioSystem:
     
     def _update_results(self, hand_data: HandData):
         """Update results screen"""
+        # Debounce safeguard for hand lost tracking in results screen
+        if hand_data.index_tip is None:
+            if not hasattr(self, '_results_lost_t') or self._results_lost_t is None:
+                self._results_lost_t = time.time()
+            if time.time() - self._results_lost_t > 0.8:
+                self.results_mirror_active = True
+        else:
+            self._results_lost_t = None
+            self.results_mirror_active = False
+
         if self.close_button.update(hand_data.index_tip):
             self.running = False
         
@@ -4865,6 +4909,7 @@ class PhysioSystem:
     # ── Pain scale helpers ──────────────────────────────────────────────
     def _start_level(self):
         """Actually start the pending level after pain score captured"""
+        self.game_has_started = False
         lv = self.pending_level or 1
         self.current_level = lv
         self.session_start = time.time()
@@ -4910,28 +4955,47 @@ class PhysioSystem:
 
 
     def _update_pain_scale(self, hand_data: HandData):
-        """Hover over a pain dot (0-10) to select; confirm by hovering 1.5s"""
-        if not hand_data.index_tip:
-            return
+        """Select a pain dot (0-10) using either hands-free hover (1.5s) or physical mouse click"""
         cx, cy = WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2
-        dot_spacing = 100
+        dot_spacing = 90
         total_w = 10 * dot_spacing
         start_x = cx - total_w // 2
+        dy = cy - 60
 
-        for i in range(11):  # 0..10
-            dx = start_x + i * dot_spacing
-            dy = cy + 30
-            dist = math.sqrt((hand_data.index_tip[0] - dx)**2 +
-                             (hand_data.index_tip[1] - dy)**2)
-            if dist < 28:
-                if not hasattr(self, '_pain_hover') or self._pain_hover != i:
-                    self._pain_hover    = i
-                    self._pain_hover_t  = time.time()
-                elif time.time() - self._pain_hover_t > 1.5:
+        m_pos = pygame.mouse.get_pos()
+        m_clicked = pygame.mouse.get_pressed()[0]
+
+        # 1. Physical Mouse Click Support (Instant Selection for high accessibility)
+        if m_clicked:
+            for i in range(11):
+                dx = start_x + i * dot_spacing
+                dist = math.sqrt((m_pos[0] - dx)**2 + (m_pos[1] - dy)**2)
+                if dist < 32:  # Expanded hit radius to 32px for easy touch clicks
                     self.pain_level = i
                     self.pain_checked = True
                     self._start_level()
-                return
+                    # Clear hover cache
+                    if hasattr(self, '_pain_hover'):
+                        del self._pain_hover
+                        del self._pain_hover_t
+                    return
+
+        # 2. Hands-Free Hover Support
+        if hand_data.index_tip:
+            for i in range(11):
+                dx = start_x + i * dot_spacing
+                dist = math.sqrt((hand_data.index_tip[0] - dx)**2 +
+                                 (hand_data.index_tip[1] - dy)**2)
+                if dist < 28:
+                    if not hasattr(self, '_pain_hover') or self._pain_hover != i:
+                        self._pain_hover    = i
+                        self._pain_hover_t  = time.time()
+                    elif time.time() - self._pain_hover_t > 1.5:
+                        self.pain_level = i
+                        self.pain_checked = True
+                        self._start_level()
+                    return
+
         # No dot hovered
         if hasattr(self, '_pain_hover'):
             del self._pain_hover
@@ -4954,7 +5018,7 @@ class PhysioSystem:
         sub = self.font_small.render(
             "Hover your finger over a number to rate your current pain  (0 = No Pain   10 = Worst Pain)",
             True, (130, 160, 200))
-        self.screen.blit(sub, sub.get_rect(center=(cx, cy - 80)))
+        self.screen.blit(sub, sub.get_rect(center=(cx, cy - 160)))
 
         # WHO NRS descriptors
         descriptors = {0:"None", 1:"Min", 2:"Mild", 3:"Mild",
@@ -4971,7 +5035,7 @@ class PhysioSystem:
 
         for i in range(11):
             dx = start_x + i * dot_spacing
-            dy = cy + 20
+            dy = cy - 60
             col = colors_nrs[i]
             r   = 22 if i != hover_i else 30
 
@@ -5006,22 +5070,22 @@ class PhysioSystem:
             lbl = self.font_medium.render(
                 f"Pain: {hover_i}/10 — {descriptors[hover_i]}   Hold 1.5s to confirm",
                 True, colors_nrs[hover_i])
-            self.screen.blit(lbl, lbl.get_rect(center=(cx, cy + 105)))
+            self.screen.blit(lbl, lbl.get_rect(center=(cx, cy + 35)))
         else:
             hint = self.font_small.render(
                 "Point your index finger at a number to select",
                 True, (80, 120, 160))
-            self.screen.blit(hint, hint.get_rect(center=(cx, cy + 105)))
+            self.screen.blit(hint, hint.get_rect(center=(cx, cy + 35)))
 
         # Floating PIP Hand Alignment Camera
-        pip_w, pip_h = 240, 180
+        pip_w, pip_h = 320, 240
         pip_x = cx - pip_w // 2
-        pip_y = 495
+        pip_y = 425
         self._draw_camera_preview(pip_x, pip_y, pip_w, pip_h, label="PAIN ASSESS HAND ALIGNMENT")
 
         # Clinical note
         note = self.font_hint.render(
-            "NRS (Numeric Rating Scale) — your pain score is saved with this session for clinical tracking",
+            "NRS Scale — Even with 0 (No Pain), repetitive coordination and ROM exercises are critical to rebuild neural motor pathways.",
             True, (60, 90, 130))
         self.screen.blit(note, note.get_rect(center=(cx, WINDOW_HEIGHT - 22)))
 
@@ -5594,50 +5658,6 @@ class PhysioSystem:
                 self.screen, self.session_data, self.best_data,
                 patient_name=self.patient_name or "Patient"
             )
-            
-            # Check hand tracking status for Results screen
-            hand_data = self.hand_engine.get_hand_data()
-            if hand_data.index_tip is None:
-                # Hand is lost! Draw a beautiful floating "Webcam Hand Alignment Mirror" PIP overlay
-                # inside the main game area to guide the patient
-                frame = self.hand_engine.get_frame()
-                if frame is not None:
-                    try:
-                        pip_w, pip_h = 320, 240
-                        pip_x = (GAME_AREA_WIDTH - pip_w) // 2
-                        pip_y = 200 # Centered vertical alignment
-                        
-                        # Draw glassmorphic background plate
-                        pip_surface = pygame.Surface((pip_w + 40, pip_h + 80), pygame.SRCALPHA)
-                        pygame.draw.rect(pip_surface, (10, 16, 28, 220), (0, 0, pip_w + 40, pip_h + 80), border_radius=10)
-                        pygame.draw.rect(pip_surface, (255, 80, 80, 255), (0, 0, pip_w + 40, pip_h + 80), 2, border_radius=10)
-                        self.screen.blit(pip_surface, (pip_x - 20, pip_y - 40))
-                        
-                        # Label
-                        lbl = self.font_medium.render("ALIGN HAND IN CAMERA FEED", True, (255, 80, 80))
-                        self.screen.blit(lbl, lbl.get_rect(center=(GAME_AREA_WIDTH // 2, pip_y - 18)))
-                        
-                        # Resize and render frame
-                        frame_resized = cv2.resize(frame, (pip_w, pip_h))
-                        frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
-                        frame_surf = pygame.surfarray.make_surface(frame_rgb.swapaxes(0, 1))
-                        
-                        # Render frame inside panel
-                        self.screen.blit(frame_surf, (pip_x, pip_y))
-                        
-                        # Technical outline corners for high tech sci-fi visual
-                        l = 20
-                        c = (255, 80, 80)
-                        pygame.draw.line(self.screen, c, (pip_x, pip_y), (pip_x + l, pip_y), 3)
-                        pygame.draw.line(self.screen, c, (pip_x, pip_y), (pip_x, pip_y + l), 3)
-                        pygame.draw.line(self.screen, c, (pip_x + pip_w, pip_y), (pip_x + pip_w - l, pip_y), 3)
-                        pygame.draw.line(self.screen, c, (pip_x + pip_w, pip_y), (pip_x + pip_w, pip_y + l), 3)
-                        pygame.draw.line(self.screen, c, (pip_x, pip_y + pip_h), (pip_x + l, pip_y + pip_h), 3)
-                        pygame.draw.line(self.screen, c, (pip_x, pip_y + pip_h), (pip_x, pip_y + pip_h - l), 3)
-                        pygame.draw.line(self.screen, c, (pip_x + pip_w, pip_y + pip_h), (pip_x + pip_w - l, pip_y + pip_h), 3)
-                        pygame.draw.line(self.screen, c, (pip_x + pip_w, pip_y + pip_h), (pip_x + pip_w, pip_y + pip_h - l), 3)
-                    except Exception:
-                        pass
             
             # PLAY AGAIN, NEXT, MAIN MENU, CLOSE buttons
             self.menu_button.draw(self.screen, self.font_small, text="PLAY AGAIN", base_col=(25,40,25), hov_col=(40,80,40))
