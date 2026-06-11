@@ -6,7 +6,7 @@ echo ======================================
 echo.
 
 set "PYTHON=python"
-set "PYTHONIOENCODING=utf-8"
+set "PYTHPONIOENCODING=utf-8"
 
 echo [1/2] Checking dependencies...
 %PYTHON% -m pip install -r requirements.txt --quiet --user 2>nul

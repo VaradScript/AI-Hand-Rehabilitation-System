@@ -1139,51 +1139,51 @@ class DatabaseManager:
             sessions = self.get_session_history(15, patient_id=patient_id)
             
             if not rom_data or not sessions:
-                surf = pygame.Surface((800, 400))
+                surf = pygame.Surface((660, 560))
                 surf.fill((8, 12, 22))
                 # Render placeholders
-                font = pygame.font.SysFont("segoeui", 22)
+                font = pygame.font.SysFont("segoeui", 20)
                 lbl = font.render("AWAITING PATIENT DATA FOR CLINICAL DASHBOARD", True, (0, 180, 255))
-                surf.blit(lbl, lbl.get_rect(center=(400, 200)))
+                surf.blit(lbl, lbl.get_rect(center=(330, 280)))
                 return surf
                 
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4), dpi=100)
+            # Create a 2x1 vertical layout with exact size 6.6x5.6 to match container aspect ratio perfectly
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6.6, 5.6), dpi=100)
             fig.patch.set_facecolor('#080c16')
             
             rom_chrono = list(reversed(rom_data))
             angles = [r[0] or 0 for r in rom_chrono]
             dates = [r[1] or "" for r in rom_chrono] 
             
-            # Glowing cyan lines and beautiful styling for flexion trend
-            ax1.plot(dates, angles, marker='o', markersize=6, color='#00ffcc', linewidth=3, 
-                     markerfacecolor='#00ffcc', markeredgecolor='#080c16')
-            ax1.set_facecolor('#0e1524')
-            ax1.set_title("Flexion ROM Trend (deg)", color='#00ffcc', fontsize=10, fontweight='bold', pad=10)
-            ax1.tick_params(colors='#8fa0c0', labelsize=8)
-            ax1.tick_params(axis='x', rotation=45)
-            ax1.grid(color='#1b3052', linestyle=':', linewidth=1)
-            ax1.spines['bottom'].set_color('#1b3052')
-            ax1.spines['top'].set_color('#1b3052')
-            ax1.spines['left'].set_color('#1b3052')
-            ax1.spines['right'].set_color('#1b3052')
+            # High-visibility neon green trend line with white nodes
+            ax1.plot(dates, angles, marker='o', markersize=6, color='#00f0ff', linewidth=3, 
+                     markerfacecolor='#32ff96', markeredgecolor='#080c16')
+            ax1.set_facecolor('#0f172a')
+            ax1.set_title("Flexion ROM Trend (deg)", color='#00f0ff', fontsize=11, fontweight='bold', pad=8)
+            ax1.tick_params(colors='#ffffff', labelsize=9)
+            ax1.tick_params(axis='x', rotation=15)
+            ax1.grid(color='#1e293b', linestyle=':', linewidth=0.8)
+            ax1.spines['bottom'].set_color('#1e293b')
+            ax1.spines['top'].set_color('#1e293b')
+            ax1.spines['left'].set_color('#1e293b')
+            ax1.spines['right'].set_color('#1e293b')
             
             sess_chrono = list(reversed(sessions))
             durations = [s[6] or 0 for s in sess_chrono] # Duration in seconds
             sdates = [(s[1] or "")[:6] for s in sess_chrono]
             
-            # Beautiful neon cyan/blue bar chart
-            ax2.bar(sdates, durations, color='#0088ff', edgecolor='#00ffcc', linewidth=1.5, alpha=0.85)
-            ax2.set_facecolor('#0e1524')
-            ax2.set_title("Rehab Session Consistency", color='#00ffcc', fontsize=10, fontweight='bold', pad=10)
-            ax2.tick_params(colors='#8fa0c0', labelsize=8)
-            ax2.tick_params(axis='x', rotation=45)
-            ax2.grid(color='#1b3052', linestyle=':', linewidth=1)
-            ax2.spines['bottom'].set_color('#1b3052')
-            ax2.spines['top'].set_color('#1b3052')
-            ax2.spines['left'].set_color('#1b3052')
-            ax2.spines['right'].set_color('#1b3052')
+            # High-visibility sky blue bars with neon green borders
+            ax2.bar(sdates, durations, color='#0088ff', edgecolor='#32ff96', linewidth=1.5, alpha=0.9)
+            ax2.set_facecolor('#0f172a')
+            ax2.set_title("Rehab Session Consistency", color='#00f0ff', fontsize=11, fontweight='bold', pad=8)
+            ax2.tick_params(colors='#ffffff', labelsize=9)
+            ax2.tick_params(axis='x', rotation=15)
+            ax2.grid(color='#1e293b', linestyle=':', linewidth=0.8)
+            ax2.spines['bottom'].set_color('#1e293b')
+            ax2.spines['top'].set_color('#1e293b')
+            ax2.spines['left'].set_color('#1e293b')
+            ax2.spines['right'].set_color('#1e293b')
             
-            fig.autofmt_xdate(rotation=45)
             fig.tight_layout()
             buf = io.BytesIO()
             fig.savefig(buf, format='png', facecolor='#080c16')
@@ -1192,7 +1192,7 @@ class DatabaseManager:
             return pygame.image.load(buf, 'png')
         except Exception as e:
             print(f"Matplotlib dashboard error: {e}")
-            surf = pygame.Surface((800, 400))
+            surf = pygame.Surface((660, 560))
             surf.fill((8, 12, 22))
             return surf
 
@@ -2389,6 +2389,7 @@ class PhysioSystem:
         self.correctness_warning = ""
         self.warning_timer = 0
         self.dashboard_surf = None
+        self.dashboard_loading = False
         
         # Virtual Sensei state
         self.last_coach_time = 0
@@ -2965,9 +2966,21 @@ class PhysioSystem:
         # History button
         if self.history_button.update(hand_data.index_tip):
             self.state = GameState.HISTORY
-            # Cache the Matplotlib dashboard image when entering History
-            self.dashboard_surf = self.db.render_matplotlib_dashboard(self.patient_name)
+            self.dashboard_surf = None
+            self.dashboard_loading = True
             self.sounds.play('select')
+            
+            # Load dashboard chart asynchronously in a background thread to prevent UI freezing
+            def load_async():
+                try:
+                    surf = self.db.render_matplotlib_dashboard(self.patient_name)
+                    self.dashboard_surf = surf
+                except Exception as e:
+                    print(f"Failed loading async chart: {e}")
+                finally:
+                    self.dashboard_loading = False
+            
+            threading.Thread(target=load_async, daemon=True).start()
             return
             
         for button in self.level_buttons:
@@ -3664,7 +3677,7 @@ class PhysioSystem:
         cam_x = WINDOW_WIDTH - cam_w - 40
         cam_y = y_start
         
-        panel_rect = pygame.Rect(cam_x - 10, cam_y - 10, cam_w + 20, cam_h + 60)
+        panel_rect = pygame.Rect(cam_x - 10, cam_y - 10, cam_w + 20, cam_h + 80)
         pygame.draw.rect(scr, (6, 10, 18), panel_rect, border_radius=8)
         pygame.draw.rect(scr, (0, 150, 120), panel_rect, 2, border_radius=8)
 
@@ -3691,7 +3704,7 @@ class PhysioSystem:
         hand_txt = f"SENSE: {hand_data.hand_label.upper()} HAND DETECTED" if hand_data.hand_label != "Unknown" else "AWAITING HAND CALIBRATION..."
         diag_col = (0, 255, 150) if hand_data.hand_label != "Unknown" else (255, 180, 0)
         diag_txt = self.font_small.render(f"STATUS: {hand_txt}", True, diag_col)
-        scr.blit(diag_txt, (cam_x, cam_y + cam_h + 32))
+        scr.blit(diag_txt, (cam_x, cam_y + cam_h + 36))
 
         # ── Input Fields (Left Side) ──────────────────────────────────
         left_x = 50
@@ -5099,6 +5112,18 @@ class PhysioSystem:
         if self.purge_button.update(hand_data.index_tip):
             self.db.clear_all_history()
             self.dashboard_surf = None # Force chart redraw
+            self.dashboard_loading = True
+            
+            def load_async():
+                try:
+                    surf = self.db.render_matplotlib_dashboard(self.patient_name)
+                    self.dashboard_surf = surf
+                except Exception as e:
+                    print(f"Failed loading async chart on purge: {e}")
+                finally:
+                    self.dashboard_loading = False
+
+            threading.Thread(target=load_async, daemon=True).start()
             self.purge_button.hover_start = None
             self.sounds.play('pop')
 
@@ -5210,8 +5235,17 @@ class PhysioSystem:
         if getattr(self, "dashboard_surf", None):
             scaled_dash = pygame.transform.scale(self.dashboard_surf, (chart_w - 4, chart_h - 4))
             self.screen.blit(scaled_dash, (chart_x + 2, chart_y + 2))
+        elif getattr(self, "dashboard_loading", False):
+            # Pulsing loader text for high contrast and dynamic feedback (clamping values to 0-255)
+            pulse = int(127 + 127 * math.sin(time.time() * 5))
+            c_r = max(0, min(pulse, 255))
+            c_g = max(0, min(pulse + 50, 255))
+            c_b = max(0, min(pulse + 128, 255))
+            no_data = self.font_medium.render("Generating Dashboard... Please wait.", True, (c_r, c_g, c_b))
+            self.screen.blit(no_data, no_data.get_rect(
+                center=(chart_x + chart_w//2, chart_y + chart_h//2)))
         else:
-            no_data = self.font_medium.render("Generating Dashboard...", True, (60, 90, 130))
+            no_data = self.font_medium.render("Awaiting Patient Data for Clinical Dashboard", True, (100, 120, 150))
             self.screen.blit(no_data, no_data.get_rect(
                 center=(chart_x + chart_w//2, chart_y + chart_h//2)))
         
