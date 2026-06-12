@@ -1051,7 +1051,7 @@ class DatabaseManager:
             if patient_id:
                 cursor.execute("""
                     SELECT id,
-                           strftime('%d %b %Y  %H:%M', timestamp) as dt,
+                           strftime('%d/%m/%Y %H:%M', timestamp) as dt,
                            level, score, avg_accuracy, avg_hand_angle,
                            duration, pain_level
                     FROM sessions 
@@ -1061,7 +1061,7 @@ class DatabaseManager:
             else:
                 cursor.execute("""
                     SELECT id,
-                           strftime('%d %b %Y  %H:%M', timestamp) as dt,
+                           strftime('%d/%m/%Y %H:%M', timestamp) as dt,
                            level, score, avg_accuracy, avg_hand_angle,
                            duration, pain_level
                     FROM sessions ORDER BY id DESC LIMIT ?
@@ -2321,6 +2321,8 @@ class PhysioSystem:
         self.history_button = LevelButton(cx - 410, 495, 260, 60, "RECOVERY HISTORY", 9, ring_radius=40)
         self.calibrate_button = LevelButton(cx - 130, 495, 260, 60, "ROM DIAGNOSTICS", 8, ring_radius=40)
         self.exit_button = LevelButton(cx + 150, 495, 260, 60, "EXIT SYSTEM", 99, ring_radius=40)
+        self.logout_button = Button(20, 15, 140, 40, "← LOGOUT", (50, 50, 70))
+        self.logout_button.duration = 1.2
         self.home_icon = HomeIcon(GAME_AREA_WIDTH - 250, 15, 240, 60)
         
         # Calibration state variables
@@ -2952,6 +2954,20 @@ class PhysioSystem:
                     btn.ring.hover_start = None
 
     def _update_menu(self, hand_data: HandData):
+        if hasattr(self, 'logout_button') and self.logout_button.update(hand_data.index_tip):
+            self.state = GameState.PATIENT_REGISTRATION
+            self.patient_name = ""
+            self.patient_age = ""
+            self.input_active = "name"
+            self.pain_checked = False
+            self.calibration_active = False
+            self.calibrated_fist_val = 0.12
+            self.calibrated_max_extension = 170.0
+            self.calibrated_min_angle = 15.0
+            self.calibrated_max_angle = 90.0
+            self.sounds.play('pop')
+            return
+
         if hasattr(self, 'exit_button') and self.exit_button.update(hand_data.index_tip):
             self.running = False
             return
@@ -3510,10 +3526,10 @@ class PhysioSystem:
                 pygame.draw.rect(self.screen, (20, 10, 15), box_rect, border_radius=15)
                 pygame.draw.rect(self.screen, border_inner_color, box_rect, 4, border_radius=15)
                 
-                warn_text = self.font_large.render(title_text, True, title_color)
+                warn_text = self.font_medium.render(title_text, True, title_color)
                 self.screen.blit(warn_text, warn_text.get_rect(center=(box_x + box_w//2, box_y + 80)))
                 
-                sub_text = self.font_medium.render(desc_text, True, (255, 255, 255))
+                sub_text = self.font_small.render(desc_text, True, (255, 255, 255))
                 self.screen.blit(sub_text, sub_text.get_rect(center=(box_x + box_w//2, box_y + 160)))
 
             # Score
@@ -3847,6 +3863,10 @@ class PhysioSystem:
     def _draw_menu(self):
         theme = self._get_theme()
         primary = theme["primary_color"]
+
+        # Draw Logout Button in top-left (allows returning to Registration screen)
+        if hasattr(self, 'logout_button'):
+            self.logout_button.draw(self.screen, self.font_small, base_col=(40, 50, 70))
 
         # Title
         title = self.font_large.render("AI PHYSIOTHERAPY", True, primary)
@@ -5151,7 +5171,8 @@ class PhysioSystem:
         # Header
         pygame.draw.rect(self.screen, (10, 20, 50),
                          pygame.Rect(0, 0, WINDOW_WIDTH, 70))
-        h1 = self.font_large.render("SESSION HISTORY", True, (0, 200, 255))
+        p_name = self.patient_name.upper() if self.patient_name else "UNKNOWN"
+        h1 = self.font_large.render(f"SESSION HISTORY: {p_name}", True, (0, 200, 255))
         self.screen.blit(h1, h1.get_rect(center=(cx, 35)))
 
         sessions = self.db.get_session_history(15, patient_id=self.patient_name)
